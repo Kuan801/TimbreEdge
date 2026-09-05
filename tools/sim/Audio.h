@@ -1,4 +1,4 @@
-// tools/sim/Audio.h  -  最小的 Teensy Audio Library 相容層（只夠跑合成器）
+// tools/sim/Audio.h  -  minimal Teensy Audio Library shim (just enough for the synth)
 #pragma once
 
 #include "Arduino.h"
@@ -10,7 +10,7 @@ struct audio_block_t {
   bool    inUse;
 };
 
-// 模擬器：把 transmit 出來的資料放這裡
+// Simulator: whatever gets transmitted lands here
 extern int16_t sim_outL[AUDIO_BLOCK_SAMPLES];
 extern int16_t sim_outR[AUDIO_BLOCK_SAMPLES];
 
@@ -25,28 +25,33 @@ protected:
   void transmit(audio_block_t *b, unsigned char ch = 0);
 };
 
-// SPI / Wire 用不到，給空殼
+// SPI / Wire are never used; empty shims
 class SPIClass { public: void setMOSI(int) {} void setSCK(int) {} };
 extern SPIClass SPI;
 
 // ============================================================================
-//  以下只給 `make inocheck` 用：把 TimbreClone.ino 在桌機上做一次語法檢查。
+//  The rest is only for `make inocheck`: syntax-check TimbreClone.ino on the
+//  desktop.
 //
-//  這些類別模擬器本身用不到（模擬器直接呼叫 AudioSynthAdditive::update()，
-//  不經過音訊圖），但 .ino 的音訊圖宣告需要它們存在。
+//  The simulator itself does not use these classes (it calls
+//  AudioSynthAdditive::update() directly, bypassing the audio graph), but the
+//  audio graph declarations in the .ino need them to exist.
 //
-//  為什麼值得做：.ino 是唯一沒有桌機編譯涵蓋的檔案，已經漏掉兩次錯了 ——
-//  一次是選單頁數對不上，一次是 gUiOctave 宣告在使用點後面。
-//  Arduino 只自動補「函式原型」，不補變數宣告，所以那種錯只有燒錄時才會爆。
+//  Why it is worth doing: the .ino is the only file with no desktop compile
+//  coverage, and it has already let two errors through -- once a menu page
+//  count that did not match, once gUiOctave declared after its use site.
+//  Arduino only auto-inserts function prototypes, not variable declarations,
+//  so that kind of error only blows up when you flash.
 //
-//  這裡只保證「編得過」，行為完全是空的，不要拿它跑任何東西。
+//  This only guarantees "it compiles"; the behaviour is completely empty, so
+//  do not run anything on it.
 // ============================================================================
 #ifdef TC_INO_CHECK
 
 #define AUDIO_INPUT_MIC     0
 #define AUDIO_INPUT_LINEIN   1
 
-// 全部要繼承 AudioStream，AudioConnection 才接得起來
+// All of them must derive from AudioStream, or AudioConnection cannot hook them up
 class TcStubStream : public AudioStream {
 public:
   TcStubStream() : AudioStream(0, nullptr) {}
@@ -72,10 +77,11 @@ public:
   AudioConnection(AudioStream &, AudioStream &) {}
   AudioConnection(AudioStream &, unsigned char, AudioStream &, unsigned char) {}
 };
-// 回傳型別要跟真的函式庫一致（PJRC control_sgtl5000.h：這幾個都是 bool，
-// 回傳「I2C 有沒有寫成功」）。以前這裡寫 void，於是 .ino 一旦開始檢查
-// 回傳值，inocheck 會用「void value not ignored」擋下來 —— 那是假標頭
-// 跟真標頭走鐘的訊號，不是 .ino 寫錯。
+// The return types have to match the real library (PJRC control_sgtl5000.h: these
+// are all bool, returning "did the I2C write succeed"). This used to be void, so
+// the moment the .ino started checking return values, inocheck would block it with
+// "void value not ignored" -- that is a sign of the fake header drifting from the
+// real one, not of a bug in the .ino.
 class AudioControlSGTL5000 {
 public:
   bool enable() { return true; }

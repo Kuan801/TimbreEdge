@@ -1,32 +1,39 @@
 // ============================================================================
-//  chaincheck.cpp  -  量錄音鏈的頻率響應
+//  chaincheck.cpp  -  measure the frequency response of the recording chain
 //
-//  用法：  ./chaincheck 參考檔.wav 錄音檔.wav [參考檔2 錄音檔2 ...]
+//  Usage:  ./chaincheck reference.wav recorded.wav [reference2 recorded2 ...]
 //
-//  兩個檔案必須是「同一個音」：參考檔是乾淨的來源，錄音檔是經過
-//  你的麥克風、線材、SGTL5000 之後錄下來的同一個音。
+//  The two files must be "the same note": the reference is the clean source,
+//  the recorded file is that same note captured through your microphone,
+//  cabling and SGTL5000.
 //
-//  --- 為什麼需要這支工具 -----------------------------------------------------
+//  --- Why this tool is needed -----------------------------------------------
 //
-//  實測發現麥克風錄的鋼琴 C4，第 4 根諧波比基頻強 20 dB；
-//  同一個音的參考素材卻是基頻比第 4 根強 22 dB —— 兩者差了 42 dB。
-//  也就是錄到的聲音「基頻幾乎不存在」。
+//  Measurements showed that on a mic-recorded piano C4 the 4th harmonic is
+//  20 dB stronger than the fundamental; on the reference material for the same
+//  note the fundamental is 22 dB stronger than the 4th -- a gap of 42 dB.
+//  In other words, the fundamental is all but absent from what we record.
 //
-//  合成器只是忠實重現它拿到的素材，所以這個問題在合成端修不了。
-//  但它也不是「聽起來怪怪的」這種模糊描述 —— 它是一條可以量出來的曲線。
-//  有了數字，就能一邊調麥克風位置一邊看有沒有改善，而不是憑感覺試。
+//  The synth only faithfully reproduces the material it is handed, so this
+//  cannot be fixed on the synthesis side. But it is also not a vague "sounds
+//  a bit off" -- it is a curve you can actually measure. With numbers you can
+//  move the microphone around and watch whether it improves, instead of
+//  trying things by feel.
 //
-//  --- 怎麼用 ----------------------------------------------------------------
+//  --- How to use it ---------------------------------------------------------
 //
-//  1. 挑一個乾淨的參考音檔（例如 Piano.mf.C4.wav）
-//  2. 用你實際的錄音方式錄同一個音
-//  3. 跑這支工具，看各頻段的相對增益
+//  1. Pick a clean reference note (e.g. Piano.mf.C4.wav)
+//  2. Record the same note the way you actually record
+//  3. Run this tool and look at the relative gain of each band
 //
-//  理想結果是每個頻段都接近 0 dB（表示錄音鏈是平坦的）。
-//  低頻負很多 = 低頻被吃掉了；中高頻正很多 = 有共振或訊號源本身沒有低頻。
+//  Ideally every band comes out near 0 dB (a flat recording chain).
+//  Very negative lows = the low end is being eaten; very positive mid/highs =
+//  a resonance, or the source itself has no low end.
 //
-//  給多組（不同音高）會一起統計，因為單一個音的結果會被那個音自己的
-//  諧波結構影響 —— 多個音高平均之後才看得出「錄音鏈」本身的特性。
+//  Give it several pairs (different pitches) and they are pooled, because a
+//  single note's result is coloured by that note's own harmonic structure --
+//  only after averaging over several pitches does the recording chain's own
+//  character show through.
 // ============================================================================
 #include <Arduino.h>
 #include <Audio.h>
@@ -42,18 +49,18 @@
 #include "../../profile.h"
 #include "../../analyzer.h"
 
-// 以八度為單位的頻段。低頻那幾段最能看出問題。
+// Bands one octave wide. The low bands show the problem most clearly.
 static const float kBandLo[] = { 60, 125, 250, 500, 1000, 2000, 4000, 8000 };
 static const int   kNBand    = (int)(sizeof(kBandLo) / sizeof(kBandLo[0]));
 
 struct Res { float db[8]; bool has[8]; };
 
-// 量一個檔案的諧波振幅（dB，以自身最大值為 0）
+// Measure one file's harmonic amplitudes (dB, its own peak taken as 0)
 static bool harmDb(const char *path, float *outDb, float *outF0, int nh = 24) {
   InstrumentProfile p;
   if (!analyzeWavFile(path, p, nullptr, nullptr)) return false;
   *outF0 = p.f0;
-  // 用持續段的關鍵影格當代表（避開起音瞬態）
+  // Use the sustain keyframe as the representative (avoids the attack transient)
   const float *kf = p.keyframe[TC_N_KEYFRAME / 2];
   float mx = 0.0f;
   for (int h = 0; h < nh && h < TC_N_HARM; h++) if (kf[h] > mx) mx = kf[h];
@@ -81,7 +88,7 @@ int main(int argc, char **argv) {
     if (!harmDb(argv[i], refDb, &f0r)) { printf("  ! 讀不到 %s\n", argv[i]); continue; }
     if (!harmDb(argv[i + 1], recDb, &f0c)) { printf("  ! 讀不到 %s\n", argv[i + 1]); continue; }
 
-    // 音高差太多就不是同一個音，比了沒有意義
+    // Too far apart in pitch means it is not the same note; no point comparing
     const float cents = 1200.0f * log2f(f0c / f0r);
     if (fabsf(cents) > 60.0f) {
       printf("  ! 這一組的音高差 %.0f cents，不是同一個音，跳過\n", cents);
@@ -102,7 +109,7 @@ int main(int argc, char **argv) {
 
   printf("\n=== 錄音鏈頻率響應（%d 組配對）===\n\n", pairs);
 
-  // 以最低的有效頻段當 0 dB 基準，看的是「傾斜」而不是絕對增益
+  // Take the lowest valid band as the 0 dB reference: we are after the tilt, not absolute gain
   float base = 0.0f;
   bool haveBase = false;
   Res r{};
@@ -110,7 +117,7 @@ int main(int argc, char **argv) {
     r.has[b] = acc[b].size() >= 2;
     if (!r.has[b]) continue;
     std::sort(acc[b].begin(), acc[b].end());
-    r.db[b] = acc[b][acc[b].size() / 2];          // 中位數，比平均穩健
+    r.db[b] = acc[b][acc[b].size() / 2];          // Median; more robust than the mean
     if (!haveBase) { base = r.db[b]; haveBase = true; }
   }
 
@@ -122,7 +129,7 @@ int main(int argc, char **argv) {
                             (b + 1 < kNBand) ? kBandLo[b + 1] : 16000.0f, "—"); continue; }
     const float v = r.db[b] - base;
     if (fabsf(v) > fabsf(worst)) worst = v;
-    // 簡單的長條圖，一格 3 dB
+    // Simple bar chart, one cell = 3 dB
     char bar[42] = {0};
     int n = (int)(fabsf(v) / 3.0f);
     if (n > 20) n = 20;

@@ -1,9 +1,11 @@
 // ============================================================================
-//  setdir_test  -  採樣資料夾（SETnn）的建立、掃描、刪除
+//  setdir_test  -  Creating, scanning and deleting the sample folders (SETnn)
 //
-//  這一段是「不可逆」的程式碼：算錯編號會蓋掉上一輪的素材，刪錯路徑會刪掉
-//  使用者自己放的錄音。真機上出錯就回不來了，所以在桌機的 SD 模擬層上先把
-//  每一條路徑跑過 —— 包含「不該刪的東西有沒有被刪掉」這種只能用負對照驗的事。
+//  This is "irreversible" code: get the numbering wrong and it overwrites the
+//  previous round's samples; delete the wrong path and it wipes out recordings the
+//  user put there. On the real hardware there is no way back, so every path is
+//  exercised first on the desktop SD simulation layer -- including things like "did
+//  something that should not be deleted survive", which only a negative test can show.
 // ============================================================================
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,7 +39,7 @@ static bool exists(const std::string &rel) {
 int main() {
   printf("\n採樣資料夾 SETnn\n");
 
-  // 每次跑都用乾淨的暫存目錄，不要動到真的素材
+  // Use a clean temp directory on every run, so the real samples are never touched
   char tmpl[] = "/tmp/tc_setdir_XXXXXX";
   const char *dir = mkdtemp(tmpl);
   if (!dir) { printf("建不出暫存目錄\n"); return 1; }
@@ -65,8 +67,9 @@ int main() {
     check("第二次拿到 SET02", tcSdMakeNextSet(b, sizeof(b)) && strcmp(b, "SET02") == 0, b);
     check("第三次拿到 SET03", tcSdMakeNextSet(c, sizeof(c)) && strcmp(c, "SET03") == 0, c);
 
-    // 中間那個被使用者手動刪掉之後，新的一輪應該補進那個洞，
-    // 而不是一路往上跳 —— 不然號碼會有斷層，久了根本認不出誰是誰
+    // Once the middle one has been deleted by hand, the next round should fill that
+    // hole instead of skipping ever upward -- otherwise the numbering gets gaps, and
+    // before long nobody can tell which set is which
     ::rmdir((gRoot + "/SET02").c_str());
     char d[12];
     check("SET02 被刪掉後，下一個補回 SET02",
@@ -76,10 +79,10 @@ int main() {
   // -------------------------------------------------------------------------
   printf("\n3) 掃描\n");
   {
-    // 放幾個「長得有點像但不是」的東西，確認不會被算進去
+    // Drop in a few things that "look sort of like it but are not", to confirm they are not counted
     SD.mkdir("SETTINGS");
     SD.mkdir("SAMPLES");
-    writeFile("SET04");                 // 同名但是檔案，不是資料夾
+    writeFile("SET04");                 // Same name, but a file, not a directory
     writeFile("Piano.mf.C4.wav");
 
     static char sets[TC_MAX_SCAN_FILES][TC_MAX_NAME_LEN];
@@ -125,7 +128,7 @@ int main() {
     check("刪不存在的資料夾回 false", !tcSdRemoveDir("SET77"));
     check("刪空字串回 false",         !tcSdRemoveDir(""));
     check("刪 nullptr 回 false",      !tcSdRemoveDir(nullptr));
-    // 指到一個「是檔案不是資料夾」的名字，絕對不能把它刪掉
+    // Point at a name that is a file, not a directory: it must never be deleted
     check("指到檔案時回 false",       !tcSdRemoveDir("SET04"));
     check("而且那個檔案還在",         exists("SET04"));
   }

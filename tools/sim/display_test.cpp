@@ -1,15 +1,18 @@
 // ============================================================================
-//  display_test.cpp  -  驗證「選單不會蓋掉狀態面板」
+//  display_test.cpp  -  verify that "the menu never covers a status panel"
 //
-//  用法：  make display_test && ./display_test
+//  Usage:  make display_test && ./display_test
 //
-//  這條規則壞掉的表現非常難查：螢幕一直在更新，看起來不像當機，但按了
-//  Auto sampling 之後採樣面板一瞬間就被選單蓋回去，電平表永遠出不來 ——
-//  使用者只會說「按了沒反應」。真正的線索是「螢幕還在更新」：
-//  那就不是當機，是畫錯東西。
+//  When this rule breaks the symptom is very hard to trace: the screen keeps
+//  updating, so it does not look like a hang, but after pressing Auto sampling
+//  the sampling panel is covered by the menu the instant it appears and the level
+//  meter never shows up -- the user just says "pressing it does nothing". The
+//  real clue is that the screen is still updating: that is not a hang, that is
+//  drawing the wrong thing.
 //
-//  displaySetState() / displaySetMenu() 的狀態邏輯都在 #if TC_USE_OLED 之外，
-//  所以 TC_USE_OLED=0 時整段規則在桌機上驗得到，不必接 OLED。
+//  The state logic in displaySetState() / displaySetMenu() sits outside the
+//  #if TC_USE_OLED block, so with TC_USE_OLED=0 the whole rule is testable on a
+//  desktop with no OLED attached.
 // ============================================================================
 #include "Arduino.h"
 #include "../../display.h"
@@ -23,7 +26,8 @@ static void check(const char *what, bool ok) {
 
 static const char kRows[4][26] = { "Row A", "Row B", "Row C", "Row D" };
 
-// 選單想開就開得起來嗎？回傳「呼叫之後選單到底有沒有顯示」
+// Can the menu open when it wants to? Returns whether the menu is actually shown
+// after the call
 static bool tryOpenMenu() {
   displaySetMenu("Menu", kRows, 4, 0, 0, 5, false);
   return displayMenuVisible();
@@ -45,10 +49,10 @@ int main() {
   check("一進入 RECORDING，選單就自動關掉", !displayMenuVisible());
 
   printf("\n3) 忙碌狀態下開選單要被擋下來\n");
-  // 這是 Auto sampling 那個 bug 的最小重現：
-  //    handleCommand("s")  -> displaySetState(RECORDING)   面板出現
-  //    uiHandleKey 結尾    -> displaySetMenu(...)          <- 就是這一步蓋掉面板
-  // 沒有這道防線的話，下面四項全都會是「選單開起來了」。
+  // Minimal reproduction of the Auto sampling bug:
+  //    handleCommand("s")  -> displaySetState(RECORDING)   panel appears
+  //    end of uiHandleKey  -> displaySetMenu(...)          <- this is what covers it
+  // Without this guard, all four cases below would report "the menu opened".
   displaySetState(TC_ST_RECORDING, "SAMPLING - play a note");
   check("採樣中開不了選單", !tryOpenMenu());
   displaySetState(TC_ST_ANALYZING, "REC.WAV");
@@ -61,7 +65,8 @@ int main() {
   check("錯誤畫面上開不了選單", !tryOpenMenu());
 
   printf("\n4) 回到閒置之後選單要能正常開\n");
-  // 擋過頭比不擋更慘 —— 選單再也回不來，就真的只能重開機了
+  // Over-blocking is worse than not blocking -- if the menu can never come back,
+  // the only way out really is a reboot
   displaySetState(TC_ST_IDLE);
   check("回到 IDLE 選單又開得起來", tryOpenMenu());
   displaySetState(TC_ST_BOOT);
@@ -74,8 +79,8 @@ int main() {
   check("nullptr 關得掉選單", !displayMenuVisible());
 
   printf("\n6) 電平表的資料設定完再開選單，選單仍然被擋\n");
-  // 採樣迴圈每 150 ms 就會設一次電平表然後 displayService()。
-  // 這一節確認那個流程不會意外把選單放回來。
+  // The sampling loop sets the level meter and calls displayService() every
+  // 150 ms. This section confirms that flow cannot accidentally put the menu back.
   displaySetState(TC_ST_RECORDING, "SAMPLING");
   displaySetLine(0, "########........");
   displaySetProgress(0.5f);

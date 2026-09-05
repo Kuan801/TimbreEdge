@@ -1,52 +1,57 @@
 // ============================================================================
 //  config.h  -  TimbreClone for Teensy 4.1 + Audio Shield (SGTL5000)
-//  全域參數。改這裡就好，不要散落在各檔案。
+//  Global parameters. Change them here, don't scatter them across files.
 // ============================================================================
 #pragma once
 
 #include <Arduino.h>
 
-// ---------------------------------------------------------------- 音訊基本 --
+// ------------------------------------------------------------ Audio basics --
 #define TC_SAMPLE_RATE      44100.0f
 #define TC_BLOCK            AUDIO_BLOCK_SAMPLES      // 128
 #define TC_BLOCK_SEC        (TC_BLOCK / TC_SAMPLE_RATE)   // 2.902 ms
 
-// ---------------------------------------------------------------- 分析參數 --
-#define TC_FFT_SIZE         2048        // 46.4 ms 視窗
-#define TC_HOP              512         // 11.6 ms 跳距
+// ----------------------------------------------------- Analysis parameters --
+#define TC_FFT_SIZE         2048        // 46.4 ms window
+#define TC_HOP              512         // 11.6 ms hop
 
-// 諧波數分成兩個概念：
-//   TC_N_HARM     逐根「分析並建模」的數量。真實錄音超過 32 根之後多半已埋進
-//                 噪聲裡，逐根建模反而是在學雜訊。
-//   TC_N_PARTIAL  實際「合成」的數量上限。33~64 根的振幅由頻譜包絡外推，
-//                 這比逐根建模穩健，也讓低音不再悶：
-//                 D2(73Hz) 舊版最高只到 1184 Hz，現在可到 4.7 kHz。
+// Two separate notions of harmonic count:
+//   TC_N_HARM     how many are analyzed and modeled one by one. Past 32, a real
+//                 recording is mostly buried in noise, so modeling each one
+//                 individually is really learning the noise.
+//   TC_N_PARTIAL  the cap on how many are actually synthesized. Amplitudes for
+//                 33~64 are extrapolated from the spectral envelope, which is
+//                 more robust than per-harmonic modeling and also stops the bass
+//                 sounding muffled: D2(73Hz) used to top out at 1184 Hz, now it
+//                 reaches 4.7 kHz.
 #define TC_N_HARM           32
 #define TC_N_PARTIAL        64
 
-#define TC_MAX_FRAMES       512         // RMS 包絡最多存幾格 (~6 秒)
-#define TC_N_KEYFRAME       32          // 音色隨時間的關鍵影格數
+#define TC_MAX_FRAMES       512         // Max RMS envelope slots (~6 s)
+#define TC_N_KEYFRAME       32          // Keyframes for timbre over time
 
-// 起音精細分析：外差解調的視窗與範圍
-#define TC_ATK_WINDOW_SEC   0.30f       // 起音後看多久
-#define TC_ATK_HOP          128         // 2.9 ms 解析度，足以分辨數十毫秒的非同步
-#define TC_ATK_LP_HZ        120.0f      // 解調後的低通，決定包絡平滑度
-#define TC_SPECENV_PTS      64          // 頻譜包絡取樣點 (log 頻率)
+// Fine attack analysis: window and range of the heterodyne demodulation
+#define TC_ATK_WINDOW_SEC   0.30f       // How long to look after the attack
+#define TC_ATK_HOP          128         // 2.9 ms resolution, enough to resolve asynchrony of tens of ms
+#define TC_ATK_LP_HZ        120.0f      // Low-pass after demodulation, sets how smooth the envelope is
+#define TC_SPECENV_PTS      64          // Spectral envelope sample points (log frequency)
 #define TC_SPECENV_FMIN     50.0f
 #define TC_SPECENV_FMAX     16000.0f
 
-// YIN 基頻搜尋範圍
+// YIN f0 search range
 #define TC_F0_MIN           65.0f       // C2
 #define TC_F0_MAX           1500.0f     // ~F#6
 #define TC_YIN_THRESH       0.15f
 
-// ---------------------------------------------------------------- 合成參數 --
-#define TC_N_VOICES         8           // 複音數 (卡農四聲部 + release 尾音餘裕)
-// USB Host 電腦鍵盤輸入。Teensy 上開啟，桌機模擬器沒有 USBHost_t36 所以關掉。
+// ---------------------------------------------------- Synthesis parameters --
+#define TC_N_VOICES         8           // Polyphony (4-voice canon + headroom for release tails)
+// USB Host computer keyboard input. On for the Teensy, off for the desktop
+// simulator because it has no USBHost_t36.
 //
-// 原本這裡是 TC_USE_USB_MIDI。USB MIDI 鍵盤從頭到尾收不到封包（裝置列舉正常、
-// 描述元正確，就是沒資料），查不出原因，最後整個移除，改用一般 USB 電腦鍵盤。
-// 舊程式碼在 舊版備份/midi_in.cpp。
+// This used to be TC_USE_USB_MIDI. The USB MIDI keyboard never received a single
+// packet, start to finish (enumeration fine, descriptors correct, just no data);
+// the cause was never found, so the whole thing was removed in favour of a plain
+// USB computer keyboard. The old code is in 舊版備份/midi_in.cpp.
 #ifndef TC_USE_USB_KBD
   #if defined(__IMXRT1062__)
     #define TC_USE_USB_KBD 1
@@ -55,466 +60,576 @@
   #endif
 #endif
 
-#define TC_SHIMMER_HZ_MIN   2.5f        // 逐諧波獨立擺動的頻率範圍
+#define TC_SHIMMER_HZ_MIN   2.5f        // Frequency range over which each harmonic wanders independently
 #define TC_SHIMMER_HZ_MAX   7.5f
 
-// 諧波抖動的補償校正（能量倍率）。
+// Compensation for harmonic jitter (energy multiplier).
 //
-// additive_synth 的目標寫得很清楚：「合成出來、用週期差分量到的非週期比」
-// 要等於分析器量到的 noiseGain。實際量下來一直差一截 —— 修正了噪聲取樣
-// 視窗之後，四種樂器的噪聲量誤差整齊地落在 -2.0 ~ -3.3 dB（長笛 -3.1、
-// 鋼琴 -2.9、小號 -3.3、提琴 -2.0），四種樂器、四種音域、同一個方向，
-// 那是補償鏈裡少了一個係數，不是四次巧合。
+// additive_synth states its goal plainly: the aperiodic ratio measured on the
+// synthesized signal by period differencing has to equal the noiseGain the
+// analyzer measured. In practice it always came up short -- after the noise
+// sampling window was fixed, the noise-level error of all four instruments
+// landed neatly in -2.0 ~ -3.3 dB (flute -3.1, piano -2.9, trumpet -3.3,
+// violin -2.0). Four instruments, four registers, all in the same direction:
+// that is a missing coefficient in the compensation chain, not four coincidences.
 //
-// 那條鏈上有兩個承認過的近似：邊帶平均增益的解析式，以及「內插造成的額外
-// 衰減 0.83」這個實測值。兩者都只算到一階，這個常數把剩下的差補起來。
-// 只作用在抖動層（寬頻噪聲層是不相關雜訊，週期差分對它沒有損失，不需要補）。
+// There are two acknowledged approximations in that chain: the closed form for
+// the mean sideband gain, and the measured value 0.83 for "the extra attenuation
+// caused by interpolation". Both are first-order only; this constant makes up
+// the rest. It applies to the jitter layer only (the broadband noise layer is
+// uncorrelated noise, period differencing loses nothing on it, so it needs no
+// compensation).
 #ifndef TC_JITTER_CAL
 #define TC_JITTER_CAL       1.9f
 
 #endif
-// 移調時怎麼決定「目標第 h 根諧波該多大聲」。
+// How to decide "how loud harmonic h of the target should be" when transposing.
 //
-//   0 = 舊作法：拿來源的第 h 根，乘上「頻譜包絡在新舊頻率的增益比」
-//   1 = 重取樣：直接問「來源在這個絕對頻率上有多大聲」，也就是把來源的
-//       諧波序列在目標的諧波頻率上重新取樣（對數域內插）
+//   0 = old method: take the source's harmonic h and multiply it by the spectral
+//       envelope's gain ratio between the old and the new frequency
+//   1 = resampling: ask directly "how loud is the source at this absolute
+//       frequency", i.e. resample the source's harmonic series at the target's
+//       harmonic frequencies (interpolated in the log domain)
 //
-// 兩者對「平均音色」的效果幾乎一樣（共振峰都留在原位），差別在**時間**：
-// 舊作法把來源第 h 根的**時間變化**原封不動搬給目標第 h 根，可是往上移調
-// 一個八度時，目標的第 h 根落在來源第 2h 根的頻率上 —— 該跟著走的是第 2h 根
-// 的起伏，不是第 h 根的。實測小號（音色庫 C4~B4，演奏到 B5，第二個八度有
-// 真實素材可以對照）：
+// For the "average timbre" the two are almost the same (formants stay put either
+// way); the difference is in **time**: the old method hands the **time variation**
+// of the source's harmonic h straight to the target's harmonic h, but transposing
+// up an octave puts the target's harmonic h at the frequency of the source's
+// harmonic 2h -- what it should follow is 2h's movement, not h's. Measured on
+// trumpet (bank C4~B4, played up to B5, with real material in the second octave
+// to compare against):
 //
-//                     LSD 起音   LSD 中段   質心相關性
-//   第 1 八度（內插）    1.14      0.66       0.924
-//   第 2 八度（外推）    2.30      1.53       0.705    <- 舊作法
+//                        LSD attack   LSD sustain   centroid r
+//   octave 1 (interp)       1.14         0.66          0.924
+//   octave 2 (extrap)       2.30         1.53          0.705    <- old method
 //
-// 平均質心是對的（合成/參考 = 0.99），錯的是隨時間的變化 —— 正好對應
-// 「搬錯了時間軌跡」這個成因。f0Play 等於參考音高時兩者完全相同，
-// 所以音色庫涵蓋得到的音一個位元都不會變。
-#define TC_TRANSPOSE_RESAMPLE   1        // 0 = 完全用舊作法（連程式碼都不編進去）
-// 混合權重：1 = 全用重取樣，0 = 全用包絡增益比。
-// 分成兩個巨集是因為 #if 不能拿浮點數當條件。
+// The mean centroid is right (synth/reference = 0.99); what is wrong is its
+// variation over time -- exactly what "the wrong time trajectory was copied"
+// would produce. When f0Play equals the reference pitch the two are identical,
+// so notes the timbre bank covers do not change by a single bit.
+#define TC_TRANSPOSE_RESAMPLE   1        // 0 = use the old method entirely (the code is not even compiled in)
+// Blend weight: 1 = all resampling, 0 = all envelope gain ratio.
+// Two macros because #if cannot take a float as its condition.
 #define TC_TRANSPOSE_RESAMPLE_W 1.0f
-// 依移調距離（半音）加權：LO 以內完全不用重取樣，HI 以上完全用。
+// Weighted by transposition distance in semitones: none within LO, full above HI.
 #define TC_TRANSPOSE_RESAMPLE_LO 1.0f
 #define TC_TRANSPOSE_RESAMPLE_HI 4.0f
 
-// 全域 partial 預算：正常演奏用不到，但釋放中的尾音疊起來時
-// (最壞 8 複音 × 64 = 512 根) 會爆掉 CPU。超過預算就等比例縮減每個
-// 聲部的諧波數，寧可略微變悶也不要爆音。實測 320 根約佔 40% CPU。
+// Global partial budget: normal playing never gets near it, but stacked release
+// tails (worst case 8 voices x 64 = 512 partials) would blow the CPU up. Over
+// budget, every voice's harmonic count is scaled back proportionally -- better
+// slightly duller than clipping. Measured: 320 partials is about 40% CPU.
 #define TC_PARTIAL_BUDGET   320
 #define TC_SINE_TBL_BITS    10
 #define TC_SINE_TBL_SIZE    (1 << TC_SINE_TBL_BITS)     // 1024
-#define TC_NYQUIST_GUARD    0.45f       // 高於 0.45*fs 的諧波直接靜音
+#define TC_NYQUIST_GUARD    0.45f       // Harmonics above 0.45*fs are muted outright
 
-// 諧波峰值的搜尋窗要不要跟著「這根諧波可能跑多遠」加寬。
+// Whether the harmonic peak search window widens with "how far this harmonic
+// could have moved".
 //
-// 固定 ±2 bin（46 ms 視窗下是 ±43 Hz）對沒有非諧性的樂器夠用，但鋼琴 C4
-// 的第 12 根諧波在 B = 0.0003 時會偏高 67 Hz —— 超出窗外，搜尋只能停在窗邊，
-// 量到的位移被截斷。舊版的 B 估計式剛好也偏高（見 analyzer.cpp 4b 的說明），
-// 兩個錯誤互相抵銷，於是鋼琴「看起來」量得很準。修好估計式之後這個截斷
-// 就藏不住了：鋼琴的非諧性會被整個判成 0。
+// A fixed +-2 bins (+-43 Hz with the 46 ms window) is enough for instruments
+// with no inharmonicity, but harmonic 12 of piano C4 sits 67 Hz sharp when
+// B = 0.0003 -- outside the window, so the search can only stop at the window
+// edge and the measured shift is truncated. The old B estimator happened to read
+// high as well (see the notes at analyzer.cpp 4b), the two errors cancelled, and
+// so the piano "looked" like it was measured accurately. Once the estimator was
+// fixed, the truncation could no longer hide: the piano's inharmonicity was
+// judged to be 0 across the board.
 //
-// 關掉（=0）會讓鋼琴的噪聲位置從 12.8 退到 14.5 pt，其餘樂器不受影響。
+// Turning it off (=0) sends the piano's noise position back from 12.8 to
+// 14.5 pt; the other instruments are unaffected.
 #ifndef TC_PEAK_WIDE
 #define TC_PEAK_WIDE        1
 #endif
 
-// shimmer 取樣窗的起點：起音後多久開始算。
-// 太早會吃進起音暫態；太晚就回到「格數不夠、直接判 0」的老問題。
-// 實測 0.15 / 0.30 / 0.45 對小提琴的估計值影響都在 0.01 以內，取最短的。
+// Start of the shimmer sampling window: how long after the attack to begin.
+// Too early swallows the attack transient; too late brings back the old
+// "not enough frames, just call it 0" problem.
+// Measured: 0.15 / 0.30 / 0.45 all change the violin estimate by less than 0.01,
+// so take the shortest.
 #ifndef TC_SHIM_START_SEC
 #define TC_SHIM_START_SEC   0.15f
 #endif
 
-// shimmer 的上限。
+// Cap on shimmer.
 //
-// 原本是 0.20。放寬取樣窗之後（見 analyzer.cpp 的 shimA），高音區不再被判 0，
-// 但 Ab5/B5 這兩個又短又高的素材量出 0.20~0.26，整片撞上上限。實測那不是
-// 一兩根諧波的離群（改用中位數也一樣高），是整個分佈都高 —— 那兩個錄音本身
-// 就不穩定。撞上限的估計值會在合成端灌進過量的振幅調變。
+// It used to be 0.20. After the sampling window was widened (see shimA in
+// analyzer.cpp) the high register is no longer forced to 0, but the two short,
+// high samples Ab5/B5 measure 0.20~0.26 and pile up against the cap right across
+// the board. Measured, that is not one or two outlier harmonics (the median is
+// just as high), the whole distribution is high -- those two recordings are
+// simply unsteady. An estimate stuck at the cap pours excessive amplitude
+// modulation into the synthesis side.
 //
-// 掃描（小提琴，其餘樂器完全不受影響）：
-//   上限   質心相關性   噪聲位置
-//   0.20     0.650      10.8      <- 比不改還差
-//   0.15     0.669      10.8
-//   0.12     0.700      10.7      <- 取這個，比原本的 0.690 還好
+// Sweep (violin; the other instruments are completely unaffected):
+//   cap      centroid r  noise pos
+//   0.20       0.650        10.8   <- worse than not changing anything
+//   0.15       0.669        10.8
+//   0.12       0.700        10.7   <- take this one, better than the original 0.690
 //
-// 0.12 也比 0.20 更貼近 profile.h 自己寫的「真實樂器約 5~10%」。
-// 誠實說明：這個數字是拿現有四種樂器掃出來的，樣本就這麼多，
-// 換一批素材未必還是最佳值 —— 它是個上限，不是量測出來的物理量。
+// 0.12 is also closer than 0.20 to profile.h's own "real instruments are around
+// 5~10%".
+// To be honest about it: this number was swept on the four instruments we have,
+// that is the whole sample, and another set of material may well prefer a
+// different value -- it is a cap, not a measured physical quantity.
 #ifndef TC_SHIM_MAX
 #define TC_SHIM_MAX         0.12f
 #endif
 
-// 諧波抖動深度 sigma 的上限。
+// Cap on the harmonic jitter depth sigma.
 //
-// 抖動是這樣套用的（additive_synth 的 2b）：
+// Jitter is applied like this (additive_synth 2b):
 //     target[h] *= clamp(1 + sigma * jit[h], 0, 2.5)   jit ~ U(-sqrt3, +sqrt3)
-// 要讓乘數恆為非負，就必須 sigma <= 1/sqrt(3) = 0.5774。超過之後兩端都會撞牆，
-// 抖動就不再是「圍繞 1 的微幅起伏」，而變成每 2.9 ms 重擲一次的隨機開關 ——
-// 聽起來就是音頭那陣沙沙聲。
+// For the multiplier to stay non-negative you need sigma <= 1/sqrt(3) = 0.5774.
+// Past that both ends hit the wall, and the jitter stops being "a small wobble
+// around 1" and becomes a random switch re-thrown every 2.9 ms -- which is
+// exactly that gritty hiss at the onset of a note.
 //
-// 實測使用者的 BANK.BIN（起音那 150 ms 的 sigma 與撞牆比例）：
-//     B5  sigma 2.27 -> 37% 被歸零、31% 被壓在 2.5 倍，合計 68%
+// Measured on the user's BANK.BIN (sigma over the first 150 ms of the attack,
+// and the fraction that hits the wall):
+//     B5  sigma 2.27 -> 37% forced to zero, 31% pinned at 2.5x, 68% in total
 //     C5  sigma 1.32 -> 45%      A#4 sigma 1.23 -> 41%
 //     F4  sigma 0.73 -> 10%      D#4 sigma 0.68 ->  8%
-// 16 組裡有 8 組的 sigma > 0.6，正好對應「很多音的起音都有沙沙聲」。
+// 8 of the 16 have sigma > 0.6, which matches "a lot of notes have a gritty
+// attack" precisely.
 //
-// 而且推導本身就假設小訊號：邊帶能量 = 2*sigma^2*mean(sin^2) 這條式子在撞牆
-// 之後完全不成立，實際送出去的能量既不等於量測值，還多了一堆寬頻失真。
+// And the derivation itself assumes a small signal: sideband energy =
+// 2*sigma^2*mean(sin^2) simply does not hold once it clips, so the energy that
+// actually goes out is neither equal to the measured value nor free of a pile of
+// broadband distortion.
 //
-// 超出上限的那份變異數不能直接丟掉 —— 實測合成的起音非週期比只有參考的
-// 0.2 倍，本來就偏少。所以改成溢流到寬頻噪聲層（見 additive_synth 的說明）。
+// The variance above the cap must not just be thrown away -- measured, the
+// synthesized attack's aperiodic ratio is only 0.2x the reference, which is
+// already too little. So it overflows into the broadband noise layer instead
+// (see the notes in additive_synth).
 #ifndef TC_JIT_SIGMA_MAX
 #define TC_JIT_SIGMA_MAX    0.5774f
 #endif
 
-// 噪聲層低通的階數。1 = 6 dB/oct（舊版），2 = 12 dB/oct。
+// Order of the noise layer's low-pass. 1 = 6 dB/oct (old), 2 = 12 dB/oct.
 //
-// 為什麼要加陡：一階的裙邊太緩，關不住弓噪。實測小提琴的非週期成分，
-// 素材有 62% 落在 2~5 kHz、5 kHz 以上只有 6.7%；一階版本卻只有 35% 在
-// 2~5 kHz，而 5 kHz 以上衝到 29% —— 少了弓噪本體，多了一層嘶聲。
-// 成因是一階低通在截止點以上只衰 6 dB/oct（A4 時截在 3.5 kHz，到 7 kHz
-// 才衰 6 dB、14 kHz 才衰 12 dB），白噪聲餵進去自然留一大堆高頻。
+// Why it has to be steeper: a first-order skirt is too gentle to hold the bow
+// noise in. Measured on the violin's aperiodic component, the material has 62%
+// in 2~5 kHz and only 6.7% above 5 kHz; the first-order version had just 35% in
+// 2~5 kHz and shot up to 29% above 5 kHz -- the bow noise itself missing, a layer
+// of hiss added. The cause is that a first-order low-pass rolls off only
+// 6 dB/oct above the corner (at A4 the corner is 3.5 kHz, so it is 6 dB down only
+// at 7 kHz and 12 dB down at 14 kHz), so white noise fed into it naturally leaves
+// a mass of high frequency behind.
 //
-// 實測掃描（四種樂器的「噪聲位置」指標，百分點，越小越好；< 8 很好、< 15 可接受）：
+// Measured sweep (the "noise position" metric of the four instruments, in
+// percentage points, smaller is better; < 8 is good, < 15 acceptable):
 //
-//   級數   長笛   鋼琴   小號   小提琴      備註
-//     1     8.5   12.9    9.8    18.5      舊版
-//     2     7.7   11.9    8.9    16.0
-//     3     7.6   11.5    8.5    15.1      <- 取這個：曲線的膝點
-//     4     7.6   11.3    8.4    14.6
-//     6      -      -      -     14.0      再往上就回頭了（8 級 14.4）
+//   order   flute   piano   trumpet    violin   note
+//     1      8.5     12.9     9.8       18.5    old version
+//     2      7.7     11.9     8.9       16.0
+//     3      7.6     11.5     8.5       15.1    <- take this: the knee of the curve
+//     4      7.6     11.3     8.4       14.6
+//     6       -       -        -        14.0    beyond this it turns back (order 8: 14.4)
 //
-// 四種樂器全部單調改善，沒有一個變差；小提琴的頻譜圖 MAE 也從 1.7 掉到 1.5。
-// 3 級之後報酬遞減很快，而且殘留的約 14 點不是斜率問題（再陡也降不下去），
-// 是帶通的中心與形狀還不夠貼 —— 那要另外改，不是靠加級數。
-// 成本：每級每個取樣點 2 個浮點運算，8 複音下約 0.7 MFLOP/s，可以忽略。
-// 噪聲帶通的低通端要串幾級 biquad（每級 2 階 = 12 dB/oct）。
+// All four instruments improve monotonically, not one gets worse; the violin's
+// spectrogram MAE also drops from 1.7 to 1.5. Returns fall off fast past order 3,
+// and the ~14 points left over are not a slope problem (no amount of steepness
+// brings them down), they are the band-pass centre and shape still not fitting
+// closely enough -- that needs a separate change, not more orders.
+// Cost: 2 flops per order per sample, about 0.7 MFLOP/s with 8 voices, negligible.
+// How many biquads to chain on the low-pass end of the noise band-pass
+// (2 poles = 12 dB/oct each).
 //
-// 舊版是「三個一階遞迴串接」，那個結構有一個致命的退化：
-// y += c*(x - y) 在 c 接近 1 時就等於 y = x。而 c = 1 - exp(-2*pi*fc/fs)，
-// 高音區把每級轉角推到 15 kHz 時 c = 0.89 —— 所謂的三階低通根本沒在濾波。
-// biquad 走雙線性轉換，轉角再高也還是低通，不會有這個問題。
+// The old version chained three first-order recursions, and that structure has
+// one fatal degeneracy: y += c*(x - y) with c close to 1 is just y = x. And
+// c = 1 - exp(-2*pi*fc/fs), so pushing each stage's corner up to 15 kHz in the
+// high register gives c = 0.89 -- the so-called third-order low-pass was not
+// filtering at all. A biquad uses the bilinear transform, so however high the
+// corner it is still a low-pass and the problem cannot arise.
 //
-// 3 級（= 6 階、36 dB/oct）是實測的落點：2 級時鋼琴起音 5 kHz 以上仍比
-// 真實素材多 6 dB，3 級之後降到 -5 dB（比真實素材還乾淨一點，安全側）。
-// 成本：每級每取樣點 5 個乘加，8 複音下約 1.8 MFLOP/s。
+// 3 stages (= 6 poles, 36 dB/oct) is where the measurements land: at 2 stages the
+// piano's attack is still 6 dB above the real material above 5 kHz, at 3 stages
+// it drops to -5 dB (slightly cleaner than the real material, on the safe side).
+// Cost: 5 multiply-adds per stage per sample, about 1.8 MFLOP/s with 8 voices.
 #ifndef TC_NOISE_LP_STAGES
 #define TC_NOISE_LP_STAGES  3
 #endif
 
-// 噪聲層的上緣要落在哪裡：頻譜包絡從峰值掉幾 dB 就算「這件樂器到此為止」。
+// Where the top edge of the noise layer goes: how many dB below the spectral
+// envelope's peak counts as "this instrument ends here".
 //
-// 這是音頭沙沙聲的真正成因。舊版的上緣是 8*f0，完全沒有參考「這件樂器
-// 在那個頻段還有沒有能量」。鋼琴 F#5 的噪聲層因此被放在 3.7~5.9 kHz，
-// 可是鋼琴自己的頻譜包絡在 2.5 kHz 就掉到 -40 dB、5 kHz 是 -67 dB。
-// in-situ 量到的結果：起音的 5 kHz 以上，噪聲層比鋼琴自己的諧波還大
-// 15~23 dB。那層噪聲落在樂器完全空白的頻段，沒有東西遮蔽，就是沙沙聲。
+// This is the real cause of the gritty attack. The old top edge was 8*f0, with no
+// reference at all to "does this instrument still have energy in that band".
+// The noise layer of piano F#5 was therefore placed at 3.7~5.9 kHz, while the
+// piano's own spectral envelope is already -40 dB at 2.5 kHz and -67 dB at 5 kHz.
+// Measured in situ: above 5 kHz during the attack, the noise layer is 15~23 dB
+// louder than the piano's own harmonics. That layer lands in a band where the
+// instrument is completely empty, nothing masks it, and that is the grit.
 //
-// specEnv 是分析時就量好的頻譜包絡（log 頻率 50 Hz~16 kHz，dB），
-// 既有的 BANK.BIN 裡就有這筆資料 —— 改用它當上限不需要重跑分析。
-// 取峰值 -35 dB 的那個頻率，四種樂器量到的落點：
-//    鋼琴 2.3~3.4 kHz   吉他 3.7 kHz   長笛 4.9 kHz
-//    小提琴 6.4 kHz     小號 7.0 kHz
-// 這個排序跟「殘差能量 90 百分位」的獨立量測一致（鋼琴 1.8 kHz、
-// 長笛 3.3 kHz、小提琴 3.7 kHz），也就是說它確實在描述同一件事。
+// specEnv is the spectral envelope already measured at analysis time (log
+// frequency 50 Hz~16 kHz, in dB), and existing BANK.BIN files already carry it --
+// using it as the ceiling needs no re-analysis.
+// Taking the frequency 35 dB below the peak, the four instruments land at:
+//    piano 2.3~3.4 kHz   guitar 3.7 kHz   flute 4.9 kHz
+//    violin 6.4 kHz      trumpet 7.0 kHz
+// That ordering agrees with the independent "90th percentile of residual energy"
+// measurement (piano 1.8 kHz, flute 3.3 kHz, violin 3.7 kHz), which says it
+// really is describing the same thing.
 //
-// 門檻為什麼是 35 而不是 30 或 40 —— 起音 >5 kHz 殘差的絕對位階誤差（dB）：
-//    門檻     鋼琴   小提琴   長笛   小號    平均
-//    舊版     15.2    1.6    3.6   15.1    8.9
-//     30       6.4    1.5   14.3   14.6    9.2    長笛的氣聲被砍掉 14 dB
-//     35       5.1    2.3    5.7   15.4    7.1  <- 四種都在 6 dB 以內
-//     40       2.6    3.3    3.3   16.8    6.5    小提琴開始多出來
-// 小號那 15 dB 不是這一層造成的（關掉寬頻層也一樣），是起音抖動層的問題。
+// Why the threshold is 35 and not 30 or 40 -- absolute level error (dB) of the
+// >5 kHz residual during the attack:
+//    thresh   piano   violin  flute   trumpet   mean
+//    old       15.2    1.6     3.6      15.1    8.9
+//     30       6.4     1.5     14.3     14.6    9.2   flute's breath noise cut by 14 dB
+//     35       5.1     2.3     5.7      15.4    7.1 <- all four within 6 dB
+//     40       2.6     3.3     3.3      16.8    6.5   violin starts to overshoot
+// The trumpet's 15 dB is not caused by this layer (turning the broadband layer
+// off changes nothing), it is a problem with the attack's jitter layer.
 #ifndef TC_NOISE_ROLL_DB
 #define TC_NOISE_ROLL_DB    35.0f
 #endif
 
-// 寬頻噪聲層的音量倍率。1.0 = 完全照量測到的 noiseGain。
+// Volume multiplier of the broadband noise layer. 1.0 = exactly the measured
+// noiseGain.
 //
-// 這一層的「份量」是量出來的，位階也對，所以正常情況下不該去動它 ——
-// 這個旋鈕存在的理由是排錯：把它設成 0 會讓那一圈迴圈照跑、亂數照消耗，
-// 只是不把結果加進輸出，所以 gain=0 與 gain=1 兩份輸出相減，
-// 得到的就是這一層本身，其他任何一項都沒有被動到。
-// 凡是會改變亂數消耗的 ablation，差值法都會失效（踩過，見失敗紀錄）。
+// This layer's "amount" is measured and its level is right, so normally it
+// should not be touched -- the reason this knob exists is debugging: setting it
+// to 0 still runs the loop and still consumes the random numbers, it just does
+// not add the result to the output, so subtracting the gain=0 output from the
+// gain=1 output gives exactly this layer with nothing else disturbed.
+// The difference method breaks for any ablation that changes random-number
+// consumption (been there, see the failure log).
 #ifndef TC_NOISE_BB_GAIN
 #define TC_NOISE_BB_GAIN    1.0f
 #endif
 
-// ---------------------------------------------------------------- MLP 參數 --
-// DDSP-lite:  [pitch, loudness, time, released] -> 32 諧波權重 + 1 噪聲增益
+// ---------------------------------------------------------- MLP parameters --
+// DDSP-lite:  [pitch, loudness, time, released] -> 32 harmonic weights + 1 noise gain
 #define TC_MLP_IN           4
 #define TC_MLP_H1           32
 #define TC_MLP_H2           32
 #define TC_MLP_OUT          (TC_N_HARM + 1)
-// MLP 音高特徵的尺度：in[0] = log2(f0/261.63) / TC_MLP_PITCH_SCALE
-// 原本是 3.0（想涵蓋 ±4.5 個八度），但實際訓練素材往往只有一個八度，
-// 結果整個資料集只用到 0~0.3 這麼窄的輸入範圍，tanh 網路分不開相鄰半音，
-// 直接輸出「所有音高的平均分佈」—— 實測 h2 被平均掉 11 個百分點、
-// h4~h7 冒出真實鋼琴沒有的能量。改成 1.0 讓一個八度就撐滿 0~0.92。
+// Scale of the MLP pitch feature: in[0] = log2(f0/261.63) / TC_MLP_PITCH_SCALE
+// It was 3.0 (meant to cover +-4.5 octaves), but real training material often
+// spans just one octave, so the whole data set only used an input range of
+// 0~0.3, the tanh network could not separate adjacent semitones, and it just
+// emitted "the average distribution over all pitches" -- measured, h2 was
+// averaged away by 11 percentage points and h4~h7 grew energy a real piano does
+// not have. Changing it to 1.0 lets one octave fill 0~0.92.
 #define TC_MLP_PITCH_SCALE  1.0f
 
-// MLP 在最終音色裡的權重：0 = 完全用量到的關鍵影格，1 = 完全用 MLP。
+// Weight of the MLP in the final timbre: 0 = use the measured keyframes only,
+// 1 = use the MLP only.
 //
-// 用真實鋼琴素材（Iowa MIS，C4~B4 共 12 個半音）實測的對數頻譜距離：
+// Log-spectral distance measured on real piano material (Iowa MIS, C4~B4,
+// 12 semitones):
 //     BLEND 0.0 -> 1.8 dB      0.35 -> 2.6 dB
 //     BLEND 0.7 -> 3.8 dB      1.0  -> 5.0 dB
-// 關鍵影格是直接量出來的，最忠實；MLP 學出來的會平滑掉細節、還會把能量
-// 洩漏到真實樂器根本沒有的諧波上（實測 h6/h7 各多出約 1%）。
+// The keyframes are measured directly and are the most faithful; what the MLP
+// learns smooths detail away and also leaks energy into harmonics the real
+// instrument simply does not have (measured, about 1% extra on each of h6/h7).
 //
-// 所以預設 0：素材若只有單一力度（例如全部都是 mf），MLP 沒有東西可學，
-// 只會把準確的量測結果弄糊。
-// 什麼時候該調高：手上有同一組音的 pp / mf / ff 三種力度時，
-// MLP 才真正派得上用場（力度→音色的非線性關係），那時候 0.3~0.5 會比較好。
+// Hence the default 0: if the material has only one dynamic level (all mf, say),
+// the MLP has nothing to learn and can only blur an accurate measurement.
+// When to raise it: once you have pp / mf / ff of the same notes, the MLP finally
+// earns its keep (the nonlinear dynamics-to-timbre relation), and then 0.3~0.5
+// is the better choice.
 #ifndef TC_MLP_BLEND
 #define TC_MLP_BLEND        0.0f
 #endif
 
-// 序列埠 'k' 做 A/B 時要切到的另一個權重。0.35 是上面那張表裡「MLP 開始
-// 明顯介入、但還沒把音色弄壞」的位置 —— 拿來現場示範差異剛好。
+// The other weight that serial 'k' switches to for A/B. 0.35 is the point in the
+// table above where "the MLP starts to intervene audibly but has not yet wrecked
+// the timbre" -- just right for demonstrating the difference live.
 //
-// 舊版的 'k' 切換的是「有沒有載入權重」(_hasMlp)，但在 BLEND=0 的預設下
-// 兩邊聽起來完全一樣，等於一個沒有作用的開關。真正該切的是混合權重。
+// The old 'k' toggled "are the weights loaded" (_hasMlp), but with the default
+// BLEND=0 both sides sounded identical, making it a switch with no effect. What
+// should be switched is the blend weight.
 #ifndef TC_MLP_BLEND_AB
 #define TC_MLP_BLEND_AB     0.35f
 #endif
 
-#define TC_MLP_MAGIC        0x324D4C50u   // 'PLM2'（特徵尺度改了，舊模型不可用）
-#define TC_PROFILE_MAGIC     0x31504355u   // 加了 vibratoHz 欄位，跳號讓舊的 BANK.BIN 被拒絕而不是誤讀   // 'TCP1'
+#define TC_MLP_MAGIC        0x324D4C50u   // 'PLM2' (feature scale changed, old models unusable)
+#define TC_PROFILE_MAGIC     0x31504355u   // Added the vibratoHz field; bumped so an old BANK.BIN is rejected, not misread   // 'TCP1'
 
-// 攤平後的參數總數 (w1,b1,w2,b2,w3,b3)，Adam 用得到
+// Total flattened parameter count (w1,b1,w2,b2,w3,b3), needed by Adam
 #define TC_MLP_NPARAM  (TC_MLP_H1 * TC_MLP_IN + TC_MLP_H1 +                  \
                         TC_MLP_H2 * TC_MLP_H1 + TC_MLP_H2 +                  \
                         TC_MLP_OUT * TC_MLP_H2 + TC_MLP_OUT)   // = 2305
-// 拆解：權重 32x4 + 32x32 + 33x32 = 2208，偏移 32 + 32 + 33 = 97，合計 2305（9.0 KB）
+// Breakdown: weights 32x4 + 32x32 + 33x32 = 2208, biases 32 + 32 + 33 = 97, 2305 total (9.0 KB)
 //
-// 這個註解一度寫成 1777 —— 那是 TC_N_HARM 還是 16 的年代（輸出 17 維）留下來的，
-// 改成 32 根諧波之後忘了更新。巨集本身一直是對的，錯的只有註解，
-// 但簡報和文件都照抄了那個數字。數字要嘛用巨集算，要嘛就得跟著改。
+// This comment once said 1777 -- a leftover from the days when TC_N_HARM was
+// still 16 (a 17-dim output), never updated after the move to 32 harmonics.
+// The macro itself was always right, only the comment was wrong, but the slides
+// and the docs both copied that number. Either compute a number from the macro,
+// or change it along with the macro.
 
-// ------------------------------------------------------------ 機上訓練 ----
-// 訓練資料放 DMAMEM(OCRAM)。每筆 21 個 float = 84 bytes。
-//   諧波數變成 32 之後，若目標仍用 float 會膨脹到 148 bytes/筆。改用
-//   「平方根壓伸 + int16」儲存：小振幅的相對解析度反而比純 float32 的
-//   低位元更好，每筆維持 84 bytes，2560 筆 ≈ 215 KB。
-//   Teensy 4.1 的 OCRAM 有 512 KB，加上分析器與權重總共約 320 KB，還有餘裕。
+// ---------------------------------------------------- On-device training ----
+// Training data goes in DMAMEM(OCRAM). 21 floats per record = 84 bytes.
+//   Once the harmonic count became 32, keeping the targets as float would have
+//   swollen this to 148 bytes/record. Stored instead as "square-root companding
+//   + int16": small amplitudes actually get better relative resolution than the
+//   low bits of a plain float32, each record stays at 84 bytes, and 2560 records
+//   is about 215 KB.
+//   The Teensy 4.1 has 512 KB of OCRAM, and with the analyzer and the weights the
+//   total is about 320 KB, so there is room to spare.
 #define TC_TRAIN_MAX        2560
 #define TC_TRAIN_BATCH      128
 #define TC_TRAIN_EPOCHS     6000
 #define TC_TRAIN_LR         0.003f
-#define TC_TRAIN_NOISE_W    0.3f       // 噪聲項在損失裡的權重
+#define TC_TRAIN_NOISE_W    0.3f       // Weight of the noise term in the loss
 
-// ---------------------------------------------------------------- 錄音參數 --
-// 錄音長度。實測（tools/evaluate.py，12 個音的鋼琴與小提琴各跑一輪）：
+// ---------------------------------------------------- Recording parameters --
+// Recording length. Measured (tools/evaluate.py, one run each over 12 notes of
+// piano and of violin):
 //
-//   素材長度   包絡r   LSD中段  頻譜圖MAE  質心r      判讀
-//     5.0 s    0.993     1.5      1.4     0.968     基準
-//     3.0 s    0.993     1.5      1.4     0.967     完全沒差
-//     2.0 s    0.993     1.5      1.4     0.975     完全沒差
-//     1.5 s    0.990     1.5      1.5     0.978     幾乎沒差
-//     1.0 s    0.891     1.5      2.3     0.965     包絡開始跑掉
-//     0.7 s    0.513     1.5      4.5     0.757     明顯劣化
-//     0.5 s    0.303     1.5      5.1     0.539     不能用
+//    length     env r   LSD sus    spec MAE   centroid r   verdict
+//     5.0 s     0.993     1.5        1.4        0.968      baseline
+//     3.0 s     0.993     1.5        1.4        0.967      no difference at all
+//     2.0 s     0.993     1.5        1.4        0.975      no difference at all
+//     1.5 s     0.990     1.5        1.5        0.978      almost no difference
+//     1.0 s     0.891     1.5        2.3        0.965      envelope starts to drift
+//     0.7 s     0.513     1.5        4.5        0.757      clearly degraded
+//     0.5 s     0.303     1.5        5.1        0.539      unusable
 //
-// 關鍵觀察：諧波分佈（LSD）到 0.5 秒都還是 1.5 dB —— 音色在起音後幾百毫秒
-// 就定型了。真正需要時間的是「包絡」，因為得看到衰減走勢。
-// 所以 2 秒就夠。好處：REC.WAV 從 441 KB 降到 176 KB，錄音等待時間少 3 秒，
-// 最重要的是「穩定拉滿 2 秒」比「穩定拉滿 5 秒」容易太多 —— 素材品質反而更好。
-// （分析時間主要由固定成本主導，縮短素材的加速有限，實測不到 2 倍。）
+// Key observation: the harmonic distribution (LSD) is still 1.5 dB even at 0.5 s
+// -- the timbre is settled a few hundred milliseconds after the attack. What
+// really needs time is the envelope, because you have to see the decay trend.
+// So 2 seconds is enough. The upside: REC.WAV drops from 441 KB to 176 KB, the
+// recording wait is 3 seconds shorter, and most importantly "hold it steady for
+// a full 2 seconds" is far easier than "hold it steady for a full 5 seconds" --
+// so the material quality actually improves.
+// (Analysis time is dominated by fixed costs, so shorter material only speeds it
+// up so much: measured, less than 2x.)
 #define TC_REC_SECONDS      2
 #define TC_REC_PATH         "REC.WAV"
 
-// ---------------------------------------------------- 麥克風連續採樣模式 --
-// 按 S 之後不用再碰鍵盤：偵測到有聲音就自動錄一段、分析、依音高命名存檔、
-// 加進音色庫，然後回到等待狀態。一個人拿樂器就能把整個音域採完。
-#define TC_TRIG_LEVEL       0.035f   // 觸發門檻（相對滿刻度）。太吵的環境要調高
+// ------------------------------------------------- Mic continuous sampling --
+// After pressing S you never touch the keyboard again: it detects sound, records
+// a take, analyzes it, names the file by pitch, saves it, adds it to the timbre
+// bank, and returns to waiting. One person with an instrument can sample the
+// whole range.
+#define TC_TRIG_LEVEL       0.035f   // Trigger threshold (relative to full scale). Raise it in a noisy room
 
-// --- 「換樂器卻忘了清空」的偵測 ---------------------------------------------
+// --- Detecting "swapped the instrument but forgot to clear" -----------------
 //
-// 入庫時算新音色跟庫裡最像的一組差多少，超過門檻就提醒。只是提醒，不擋。
+// On insertion, compute how far the new timbre is from the closest entry already
+// in the bank, and warn if that exceeds the threshold. A warning only, nothing
+// is blocked.
 //
-// 這兩個數字是量出來的，不是猜的。素材：小號 33 音（E3~B5）、鋼琴/提琴/長笛
-// 各 12 音（C4~B4），共 68 個，2278 組配對。工具 tools/sim/envdist。
+// These two numbers are measured, not guessed. Material: trumpet 33 notes
+// (E3~B5), piano/violin/flute 12 notes each (C4~B4), 68 in all, 2278 pairings.
+// Tool: tools/sim/envdist.
 //
-//   門檻 2.0，庫裡 >= 3 組時：
-//     同樂器誤報率            1.07%
-//     鋼琴 <-> 管樂/弦樂偵測率  100%
-//     管樂/弦樂彼此偵測率      約 67%
+//   Threshold 2.0, with >= 3 entries in the bank:
+//     same-instrument false-alarm rate       1.07%
+//     piano <-> wind/string detection rate    100%
+//     wind vs. string detection rate          ~67%
 //
-//   庫裡只有 1 組時誤報率會跳到 9.64%，所以要求至少 3 組才開口。
+//   With only 1 entry in the bank the false-alarm rate jumps to 9.64%, so it
+//   stays quiet until there are at least 3.
 //
-// 誠實的限制：只有 4 種樂器、權重是手訂的。抓得到「管樂換成鋼琴」這種明顯的
-// 情況，小號換長號那種大概分不出來。當作提示，不是判定。
+// The honest limitation: only 4 instruments, and the weights are hand-set. It
+// catches obvious cases like "wind swapped for piano"; trumpet swapped for
+// trombone it probably cannot tell apart. Treat it as a hint, not a verdict.
 #define TC_TIMBRE_WARN_DIST     2.0f
 #define TC_TIMBRE_WARN_MIN_REFS 3
-// 連續幾個 block 超過門檻才算真的起音。2 個 block 只有 5.8 ms，噪音尖峰
-// 輕易就能湊到；4 個是 11.6 ms，而真實樂器的起音都遠長於這個時間
-// （實測最快的是鋼琴，5.8 ms 就爬到峰值的一半），所以不會漏掉真正的音。
+// How many consecutive blocks have to exceed the threshold to count as a real
+// attack. 2 blocks is only 5.8 ms, which a noise spike manages easily; 4 blocks
+// is 11.6 ms, and real instrument attacks are all far longer than that (measured,
+// the fastest is the piano, climbing to half its peak in 5.8 ms), so no real note
+// is missed.
 #define TC_TRIG_BLOCKS      4
 
-// --- 觸發門檻的環境自適應 ---------------------------------------------------
+// --- Ambient adaptation of the trigger threshold ----------------------------
 //
-// TC_TRIG_LEVEL 現在是「下限」而不是「門檻」。實際門檻 = max(下限, 環境噪音 × 邊界)。
+// TC_TRIG_LEVEL is now a floor, not a threshold. Actual threshold =
+// max(floor, ambient noise x margin).
 //
-// 為什麼非改不可（量的是使用者實際錄到的 12 個檔，每個取最安靜的 0.3 秒，
-// 共 1236 個 block）：
+// Why this had to change (measured on the 12 files the user actually recorded,
+// taking the quietest 0.3 s of each, 1236 blocks in all):
 //
-//     背景 block 峰值   中位 0.0207   99% 0.0281   最大 0.0301
-//     最弱的音          block 峰值中位 0.0529
-//     原本的固定門檻    0.035
+//     background block peak   median 0.0207   99% 0.0281   max 0.0301
+//     weakest note            median block peak 0.0529
+//     the old fixed threshold 0.035
 //
-// 背景最大值離門檻只有 1.16 倍（1.3 dB）。房間裡多一台風扇就會整晚亂錄，
-// 而這正是實際發生的事。
+// The background maximum is only 1.16x (1.3 dB) below the threshold. One more fan
+// in the room and it records all night long -- which is exactly what happened.
 //
-// 邊界取 1.5：背景最大 0.0301 × 1.5 = 0.045，擋得掉噪音；
-// 最弱的音 0.0529 仍然過得去。但這個餘裕只有 1.4 dB，非常薄 ——
-// 所以 TriggerGate 會把實際餘裕算出來報給使用者，薄到不能用的時候要講。
+// Margin of 1.5: background max 0.0301 x 1.5 = 0.045, which keeps the noise out,
+// while the weakest note at 0.0529 still gets through. But that leaves only
+// 1.4 dB of headroom, which is very thin -- so TriggerGate works out the actual
+// headroom and reports it to the user, and says so when it is too thin to use.
 #define TC_TRIG_MARGIN      1.5f
-#define TC_TRIG_CAL_MS      600      // 開始採樣後先聽多久，量環境噪音
-// 什麼叫「安靜」。
+#define TC_TRIG_CAL_MS      600      // How long to listen after sampling starts, to measure the ambient noise
+// What counts as "quiet".
 //
-// 第一版寫成「低於門檻的 0.6 倍」，桌機測試立刻抓到問題：門檻本身就是
-// 環境噪音 × 1.5，所以 0.6 × 門檻 = 0.9 × 環境噪音 —— 環境噪音自己就會
-// 一直超過這條線（實測波峰因數 1.46），於是「連續安靜 400 ms」永遠湊不滿，
-// 永遠不會武裝，一個音都收不到。修掉亂觸發卻換成完全不觸發，一樣沒用。
+// The first version said "below 0.6x the threshold", and desktop testing caught
+// the problem straight away: the threshold is itself ambient noise x 1.5, so
+// 0.6 x threshold = 0.9 x ambient noise -- the ambient noise on its own keeps
+// crossing that line (measured crest factor 1.46), so "400 ms of continuous
+// quiet" is never reached, it never arms, and not a single note is captured.
+// Fixing the spurious triggering by never triggering at all is just as useless.
 //
-// 正確的語意是「回到環境噪音的水準」，所以要以環境噪音為基準而不是門檻：
-//     安靜線 = max(環境噪音 × 1.20, 設定下限 × 0.60)
-//     觸發線 = max(環境噪音 × 1.50, 設定下限)
-// 兩條線中間留下遲滯帶，訊號要明顯高於環境才觸發、要掉回環境才重新武裝。
+// The correct meaning is "back down to the level of the ambient noise", so it has
+// to be referenced to the ambient noise and not to the threshold:
+//     quiet line   = max(ambient noise x 1.20, configured floor x 0.60)
+//     trigger line = max(ambient noise x 1.50, configured floor)
+// The gap between the two lines is hysteresis: the signal has to be clearly above
+// ambient to trigger, and has to fall back to ambient before it re-arms.
 #define TC_TRIG_QUIET_MARGIN 1.20f
 #define TC_TRIG_QUIET_FRAC   0.60f
 
-// 訊號比環境噪音高多少 dB 才算堪用。低於這個值，觸發是不是真的抓到音
-// 就變成運氣問題。12 dB = 4 倍，是「聽得出誰是誰」的合理下限。
+// How many dB above the ambient noise the signal has to be to be usable. Below
+// this value, whether a trigger really caught a note becomes a matter of luck.
+// 12 dB = 4x, a reasonable floor for "you can tell which is which".
 #define TC_TRIG_MIN_HEADROOM_DB  12.0f
-#define TC_PREROLL_BLOCKS   32       // 前置緩衝 93 ms：觸發時起音已經發生了，
-                                     // 沒有這個緩衝會把最關鍵的起音瞬態切掉
-#define TC_REARM_SILENT_MS  400      // 錄完後要等安靜多久才重新武裝
+#define TC_PREROLL_BLOCKS   32       // 93 ms of pre-roll: by the time it triggers the attack has already happened,
+                                     // without this buffer the most critical attack transient gets cut off
+#define TC_REARM_SILENT_MS  400      // How long it has to stay quiet after a take before re-arming
 #define TC_PROFILE_PATH     "PROFILE.BIN"
 #define TC_MODEL_PATH       "MODEL.BIN"
-#define TC_PLAY_PATH        "PLAY.WAV"     // 演奏半音階時錄下來的成品
-#define TC_CANON_PATH       "CANON.WAV"    // 演奏卡農時錄下來的成品
-                                           // 兩份分開存：半音階是評測用的，
-                                           // 卡農是試聽用的，互相蓋掉就得重錄一次。
-                                           // CANON.WAV 這個名字以前是 PLAY.WAV 的舊名，
-                                           // wav_io 的「程式產生的檔」規則本來就認得它，
-                                           // 所以 y y 一樣刪得掉
-#define TC_BANK_PATH        "BANK.BIN"     // 多音高音色庫
+#define TC_PLAY_PATH        "PLAY.WAV"     // The take recorded while playing the chromatic scale
+#define TC_CANON_PATH       "CANON.WAV"    // The take recorded while playing the canon
+                                           // Kept as two files: the chromatic scale
+                                           // is for evaluation, the canon for
+                                           // listening; overwriting one means
+                                           // recording it again.
+                                           // CANON.WAV is PLAY.WAV's old name, which
+                                           // wav_io's "generated by the program" rule
+                                           // already recognizes, so y y still deletes it
+#define TC_BANK_PATH        "BANK.BIN"     // Multi-pitch timbre bank
 
-// 批次載入時最多掃描幾個 WAV
+// Max WAVs to scan on a batch load
 #define TC_MAX_SCAN_FILES   32
 #define TC_MAX_NAME_LEN     32
 
-// ------------------------------------------------------- USB MTP（磁碟機）--
-//  把 SD 卡掛成電腦上的一個磁碟機，成品 WAV 與 BANK.BIN 不用拔卡就拿得到。
-//  遠端維護時這是唯一能把檔案帶回電腦的路。
+// ---------------------------------------------------- USB MTP (disk drive) --
+//  Mounts the SD card as a drive on the computer, so the finished WAVs and
+//  BANK.BIN can be fetched without pulling the card out. For remote maintenance
+//  this is the only way to get files back to a computer.
 //
-//  要用的話兩件事：
-//    1. Arduino IDE -> Tools -> USB Type -> 「Serial + MTP Disk (Experimental)」
-//    2. 安裝 MTP_Teensy 函式庫（Teensyduino 沒有內建）
+//  Two things are needed to use it:
+//    1. Arduino IDE -> Tools -> USB Type -> "Serial + MTP Disk (Experimental)"
+//    2. install the MTP_Teensy library (not bundled with Teensyduino)
 //         https://github.com/KurtE/MTP_Teensy
 //
-//  USB Type 沒選對時 TC_HAS_MTP 會是 0，整段自動編譯掉 —— 這樣同一份原始碼
-//  在一般的「Serial」USB Type 下照樣編得過，不會因為少一個函式庫就整包壞掉。
-//  （MTP_Teensy.h 自己會 #error，所以 include 一定要包在條件裡面。）
+//  With the wrong USB Type, TC_HAS_MTP is 0 and the whole section compiles out --
+//  so the same source still builds under the ordinary "Serial" USB Type and does
+//  not fall apart just because one library is missing.
+//  (MTP_Teensy.h has its own #error, so the include must stay inside the
+//  conditional.)
 #if defined(USB_MTPDISK) || defined(USB_MTPDISK_SERIAL)
 #define TC_HAS_MTP          1
 #else
 #define TC_HAS_MTP          0
 #endif
 
-//  開機後 MTP 要不要預設開著。
+//  Whether MTP is on by default after boot.
 //
-//  為什麼需要這個開關：PJRC 自己在 Teensyduino 1.57 的公告裡就寫「要讓 MTP
-//  與 Teensy 同時存取檔案還有很多工作要做」，而 MTP_Teensy 的 issue #41 記錄了
-//  MTP 掛載期間寫 SD 會逾時失敗，並且「內建 SD 槽比 audio shield 的 SPI 槽
-//  更嚴重」—— 本專案的 tcSdBegin() 正是優先用內建 SDIO 槽，剛好踩在最糟的
-//  組合上。而這裡的寫入不是可有可無的：演奏時是 44.1 kHz 立體聲即時串流寫檔，
-//  漏一個 block 就是成品裡的一個爆音。
+//  Why this switch is needed: PJRC's own Teensyduino 1.57 announcement says
+//  there is still a lot of work to do before MTP and the Teensy can access files
+//  at the same time, and MTP_Teensy issue #41 records SD writes timing out and
+//  failing while MTP is mounted, and that "the built-in SD socket is worse than
+//  the audio shield's SPI socket" -- this project's tcSdBegin() prefers exactly
+//  that built-in SDIO socket, landing squarely on the worst combination. And the
+//  writes here are not optional: during playback this is a live 44.1 kHz stereo
+//  stream being written to file, and one dropped block is one click in the
+//  finished take.
 //
-//  所以防線有三層：預設開關（這裡）、loop() 只在完全閒置時服務 MTP、
-//  以及序列埠的 u 指令可以當場關掉。
+//  So there are three lines of defence: the default switch (here), loop() only
+//  servicing MTP when completely idle, and the serial u command to turn it off
+//  on the spot.
 #ifndef TC_MTP_DEFAULT_ON
 #define TC_MTP_DEFAULT_ON   1
 #endif
 
-// -------------------------------------------------------------- OLED 面板 --
-// 沒接面板就改成 0，其餘程式完全不受影響（桌機模擬器就是用 -DTC_USE_OLED=0）
+// -------------------------------------------------------------- OLED panel --
+// Set to 0 with no panel attached; nothing else is affected (the desktop
+// simulator builds with -DTC_USE_OLED=0)
 #ifndef TC_USE_OLED
 #define TC_USE_OLED         1
 #endif
 
-// 驅動 IC。128x64 模組常見三種，外觀幾乎一樣但記憶體對映不同：
-//   SSD1306 : 0.96 吋，最常見
-//   SH1106  : 1.3 吋，畫面會左右偏移 2 pixel 的話就是這顆
-//   SSD1309 : 1.54 / 2.42 吋
-// 只要改這三行其中一個為 1，其餘為 0。
+// Driver IC. Three are common on 128x64 modules; they look almost identical but
+// their memory maps differ:
+//   SSD1306 : 0.96", the most common
+//   SH1106  : 1.3", the one you have if the image is shifted 2 pixels sideways
+//   SSD1309 : 1.54" / 2.42"
+// Just set one of these three lines to 1 and the other two to 0.
 #define TC_OLED_SSD1306     1
 #define TC_OLED_SH1106      0
 #define TC_OLED_SSD1309     0
 
-#define TC_OLED_I2C_HZ      400000     // 畫面有雜訊就降到 100000
-#define TC_OLED_REFRESH_MS  200        // 128x64 全畫面 @400kHz 約 20 ms，別更新太頻繁
+#define TC_OLED_I2C_HZ      400000     // Drop to 100000 if the display is noisy
+#define TC_OLED_REFRESH_MS  200        // A full 128x64 frame @400kHz takes about 20 ms, so don't refresh too often
 
-// ------------------------------------------------------------------- 腳位 --
-// Teensy 4.1 內建 SD (SDIO) 優先，失敗才退回 Audio Shield 的 SPI SD
+// -------------------------------------------------------------------- Pins --
+// Prefer the Teensy 4.1's built-in SD (SDIO), fall back to the Audio Shield's
+// SPI SD only if that fails
 #define TC_SDCARD_CS_PIN    10
 #define TC_SDCARD_MOSI_PIN  11
 #define TC_SDCARD_SCK_PIN   13
 
-// 選用實體按鈕 (接地觸發，INPUT_PULLUP)。不接也可以，全部用序列埠指令。
-// 四顆輕觸開關：一腳接下列腳位，另一腳接 GND（用內部上拉，不需外接電阻）。
+// Optional physical buttons (active low, INPUT_PULLUP). They can be left out;
+// everything is reachable through serial commands too.
+// Four tactile switches: one leg to the pins below, the other to GND (internal
+// pull-ups, no external resistors needed).
 //
-// 選在 2~5 是因為它們是 audio shield 底排「連續的四個空孔」，而且緊鄰
-// 右下角的 GND —— 四顆按鈕可以共用那一個 GND，線最短。
+// 2~5 were chosen because they are four consecutive free holes on the audio
+// shield's bottom row, right next to the GND in the bottom-right corner -- all
+// four buttons can share that one GND, with the shortest wiring.
 //
-// audio shield Rev D 實際用到的腳位（官方表格）：
-//     音訊資料 7 8 20 21 23 / 控制 18 19 / SD 卡 10 11 12 13 / 記憶體晶片 6
-//     音量旋鈕 15（沒焊旋鈕就是空的）
-// 也就是說 shield 上空著的孔有 0 1 2 3 4 5 9 14 15 16 17 22 共 12 個。
-// （早期這裡的註解寫成 shield 有用 9、15、22，那是錯的。）
+// The pins the audio shield Rev D actually uses (from the official table):
+//     audio data 7 8 20 21 23 / control 18 19 / SD card 10 11 12 13 / memory chip 6
+//     volume pot 15 (free if no pot is soldered on)
+// So the holes left free on the shield are 0 1 2 3 4 5 9 14 15 16 17 22, twelve
+// in all.
+// (An early version of this comment said the shield uses 9, 15 and 22; that was
+// wrong.)
 #define TC_BTN_UP           2
 #define TC_BTN_DOWN         3
 #define TC_BTN_OK           4
 #define TC_BTN_BACK         5
 
-// 去彈跳：狀態要穩定這麼久才承認。輕觸開關的彈跳多半 1~5 ms，
-// 接觸不良的更久；20 ms 夠寬鬆又不至於讓人覺得遲鈍。
+// Debounce: a state has to hold this long to be accepted. Tactile switches mostly
+// bounce for 1~5 ms, longer with a poor contact; 20 ms is loose enough without
+// feeling sluggish.
 #define TC_BTN_DEBOUNCE_MS      20
-// 上下鍵按住之後的自動連發（調 micGain 0~63 才不用按 63 下）
+// Auto-repeat once the up/down keys are held (so micGain 0~63 doesn't take 63 presses)
 #define TC_BTN_REPEAT_DELAY_MS  400
 #define TC_BTN_REPEAT_MS        120
 
-// 12 顆實體琴鍵 C4~B4。每顆一腳接腳位、另一腳接 GND（12 顆共用一條 GND）。
+// 12 physical keys, C4~B4. One leg of each to a pin, the other to GND (all 12
+// share one GND wire).
 //
-// 白鍵放近側那排、黑鍵放遠側那排 —— 跟真實鍵盤的排列一致，而且兩組各自連續：
+// White keys on the near row, black keys on the far row -- matching the layout of
+// a real keyboard, and each group stays contiguous:
 //
-//     白鍵（跟 0~12 同一排）  C4=24  D4=25  E4=26  F4=27  G4=28  A4=29  B4=30
-//     黑鍵（跟 13~23 同一排） C#4=34 D#4=35 F#4=36 G#4=37 A#4=38
+//     white keys (row with 0~12)   C4=24  D4=25  E4=26  F4=27  G4=28  A4=29  B4=30
+//     black keys (row with 13~23)  C#4=34 D#4=35 F#4=36 G#4=37 A#4=38
 //
-// Teensy 4.1 尾端本來就是兩排分開的（近側 24~33、遠側 34~41），與其硬排成
-// 24~35 讓 10 支在這排、2 支在那排，不如照鍵盤本來的樣子分。接線時
-// 「上面一排都是黑鍵、下面一排都是白鍵」，插錯位置一眼就看得出來。
+// The tail of the Teensy 4.1 is already two separate rows (near 24~33, far
+// 34~41), so rather than forcing 24~35 and leaving 10 pins in one row and 2 in
+// the other, split them the way a keyboard already is. When wiring, "the top row
+// is all black keys, the bottom row all white", so a wire in the wrong place is
+// obvious at a glance.
 //
-// 剩下沒用到的：31 32 33（近側）、39 40 41（遠側）。
+// Left unused: 31 32 33 (near) and 39 40 41 (far).
 //
-// 這一段是 audio shield 蓋不到的地方，跟 shield 完全不打架。
-// 直接接 12 支而不是 4x3 矩陣：矩陣同時按三顆以上會出現鬼鍵，要防就得每顆
-// 串一顆二極體；而且這台合成器有 8 個聲部，直接接才真的彈得出和弦。
+// This area is out of the audio shield's reach, so there is no conflict with the
+// shield at all.
+// Wiring all 12 directly instead of a 4x3 matrix: a matrix ghosts as soon as
+// three keys are held, and preventing that means a diode in series with every
+// key; and this synth has 8 voices, so direct wiring is what actually lets you
+// play chords.
 //
-// 順序固定是 C C# D D# E F F# G G# A A# B，改腳位只要改這一行。
+// The order is always C C# D D# E F F# G G# A A# B; changing pins means changing
+// only this one line.
 #define TC_KEY_PINS { 24, 34, 25, 35, 26, 27, 36, 28, 37, 29, 38, 30 }
 
-// ------------------------------------------------------------------- 演奏 --
+// ------------------------------------------------------------- Performance --
 #define TC_BPM              66.0f
-#define TC_TICKS_PER_BEAT   4           // 16 分音符解析度
+#define TC_TICKS_PER_BEAT   4           // Sixteenth-note resolution
 #define TC_MAX_NOTES        224
 
-// ------------------------------------------------------------------- 工具 --
+// --------------------------------------------------------------- Utilities --
 static inline float tc_midiToHz(float midi) {
   return 440.0f * powf(2.0f, (midi - 69.0f) / 12.0f);
 }
@@ -526,9 +641,11 @@ static inline float tc_clampf(float v, float lo, float hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
-// Padé 近似的 tanh，誤差 < 0.3%，但比 tanhf() 快一個數量級
-// （M7 沒有硬體超越函數，tanhf 要 50~100 cycle）。
-// 推論和訓練「必須用同一個」，否則會有 train/inference mismatch。
+// Padé approximation of tanh, error < 0.3%, but an order of magnitude faster
+// than tanhf() (the M7 has no hardware transcendentals, tanhf costs 50~100
+// cycles).
+// Inference and training MUST use the same one, otherwise you get a
+// train/inference mismatch.
 static inline float tc_tanh(float x) {
   if (x < -3.0f) return -1.0f;
   if (x >  3.0f) return  1.0f;
@@ -539,13 +656,17 @@ static inline float tc_sigmoid(float x) {
   return 0.5f * (1.0f + tc_tanh(0.5f * x));
 }
 
-// ---------------------------------------------------------------- 時間扭曲 --
-// 起音只有幾十毫秒，卻要和長達數秒的持續段共用同一組關鍵影格 —— 線性分配的話
-// 每格 150 ms，整個起音塞不滿一格，等於完全沒被建模。
-// 改用對數時間軸後，前 200 ms 拿到約 1/3 的格數、前 500 ms 拿到一半。
+// --------------------------------------------------------------- Time warp --
+// The attack lasts only tens of milliseconds, yet it has to share one set of
+// keyframes with a sustain that runs for seconds -- allocate them linearly and
+// each frame is 150 ms, so the whole attack does not even fill one frame, which
+// means it is not modeled at all.
+// On a logarithmic time axis the first 200 ms gets about 1/3 of the frames and
+// the first 500 ms gets half.
 //
-// ★ 分析器、推論、MLP 的第 3 個輸入特徵、Python 訓練腳本，四處必須用同一個
-//   定義，否則訓練與推論對不上。
+// ★ The analyzer, inference, the MLP's 3rd input feature and the Python training
+//   script must all use the same definition, or training and inference will not
+//   line up.
 #define TC_TIME_WARP_TAU    0.06f
 static inline float tc_timeWarp(float tSec, float noteDur) {
   if (noteDur < 1e-3f) noteDur = 1e-3f;
@@ -554,8 +675,9 @@ static inline float tc_timeWarp(float tSec, float noteDur) {
   return logf(1.0f + k * tSec) / logf(1.0f + k * noteDur);
 }
 
-// 這個音高該發幾根諧波：塞滿到 Nyquist 為止，但不超過上限。
-// 低音給滿 64 根（D2 -> 4.7 kHz），高音自然變少（A5 880Hz 只需 22 根）。
+// How many harmonics this pitch should emit: pack them in up to Nyquist, but no
+// more than the cap. Low notes get the full 64 (D2 -> 4.7 kHz), high notes
+// naturally get fewer (A5 at 880Hz needs only 22).
 static inline int tc_partialCount(float f0) {
   if (f0 <= 1.0f) return 1;
   int n = (int)(TC_SAMPLE_RATE * TC_NYQUIST_GUARD / f0);

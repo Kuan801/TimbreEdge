@@ -1,19 +1,21 @@
 // ============================================================================
-//  xrange.cpp  -  「用一小段音域訓練，往外推到整個音域」的實驗工具
+//  xrange.cpp  -  experiment tool: "train on a narrow range, extrapolate out"
 //
-//  用法：
-//     ./xrange out.wav <起始MIDI> <結束MIDI> 訓練用.WAV [訓練用.WAV ...]
+//  Usage:
+//     ./xrange out.wav <startMIDI> <endMIDI> training.WAV [training.WAV ...]
 //
-//  例：只用 C4~B4 建音色庫，卻要它演奏 E3~B5
+//  Example: build the bank from C4~B4 only, but make it play E3~B5
 //     ./xrange out.wav 52 83 T_C4.WAV T_Db4.WAV ... T_B4.WAV
 //
-//  為什麼需要這個而不是直接用 sim：
-//  sim 走的是 score.cpp 寫死的 C3~B4 24 音。要量「移調距離對音色的影響」，
-//  就得讓演奏音域和訓練音域各自獨立指定 —— 訓練音域內的那幾個音是「內插」，
-//  外面的才是真正在考驗移調與共振峰校正。
+//  Why this exists instead of just using sim:
+//  sim plays the 24 notes C3~B4 hard-coded in score.cpp. To measure "how far
+//  transposition degrades the timbre" the played range and the trained range
+//  have to be given independently -- notes inside the trained range are
+//  interpolation, only the ones outside really exercise transposition and
+//  formant correction.
 //
-//  時序刻意跟 score.cpp 完全一致（66 BPM、每音 8 tick、不留空隙），
-//  這樣 evaluate.py 才切得開。
+//  Timing is deliberately identical to score.cpp (66 BPM, 8 ticks per note,
+//  no gaps) so that evaluate.py can cut the notes apart.
 // ============================================================================
 #include <Arduino.h>
 #include <Audio.h>
@@ -44,7 +46,7 @@ int main(int argc, char **argv) {
   const int   midiLo  = atoi(argv[2]);
   const int   midiHi  = atoi(argv[3]);
 
-  // ---- 建音色庫（只用命令列給的那幾個檔）--------------------------------
+  // ---- Build the bank (only the files given on the command line) ----------
   printf("=== 建立音色庫 ===\n");
   for (int i = 4; i < argc; i++) {
     InstrumentProfile p;
@@ -62,7 +64,7 @@ int main(int argc, char **argv) {
   gSynth.setMasterGain(0.18f);
   gSynth.setVibrato(50.0f, 4.8f);
 
-  // 音色庫涵蓋的音高範圍（用來標記每個音是內插還是外推）
+  // Pitch range the bank covers (used to mark each note interpolated or extrapolated)
   float bankLo = 1e9f, bankHi = 0.0f;
   for (int i = 0; i < gBank.n; i++) {
     if (gBank.p[i].f0 < bankLo) bankLo = gBank.p[i].f0;
@@ -70,8 +72,8 @@ int main(int argc, char **argv) {
   }
   printf("\n音色庫 %d 組，涵蓋 %.1f ~ %.1f Hz\n", gBank.n, bankLo, bankHi);
 
-  // ---- 演奏 --------------------------------------------------------------
-  // 時序與 score.cpp 一致：每音 8 tick，tick = 60/(BPM*4) 秒
+  // ---- Play ---------------------------------------------------------------
+  // Timing matches score.cpp: 8 ticks per note, tick = 60/(BPM*4) seconds
   const float tickSec  = 60.0f / (TC_BPM * TC_TICKS_PER_BEAT);
   const float noteSec  = 8.0f * tickSec;
   const int   blocksPerNote = (int)(noteSec / TC_BLOCK_SEC + 0.5f);
@@ -90,8 +92,8 @@ int main(int argc, char **argv) {
 
     gSynth.noteOn((float)m, 100.0f / 127.0f, 0.5f);
     for (int b = 0; b < blocksPerNote; b++) {
-      // score.cpp 的 dur == NOTE_TICKS，所以放開時刻就是這一格的結尾。
-      // 提前一個 block 送 noteOff，才不會跟下一個音的 noteOn 撞在同一格。
+      // score.cpp's dur == NOTE_TICKS, so the release instant is this slot's end.
+      // Send noteOff one block early so it doesn't collide with the next noteOn.
       if (b == blocksPerNote - 1) gSynth.noteOff((float)m);
       gSynth.update();
       for (int k = 0; k < TC_BLOCK; k++) {
@@ -100,7 +102,7 @@ int main(int argc, char **argv) {
       }
     }
   }
-  // 讓最後一個音的 release 走完
+  // Let the last note's release run out
   gSynth.allNotesOff();
   for (int b = 0; b < (int)(1.5f / TC_BLOCK_SEC); b++) {
     gSynth.update();
@@ -110,7 +112,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ---- 寫檔 --------------------------------------------------------------
+  // ---- Write the file -----------------------------------------------------
   FILE *f = fopen(outPath, "wb");
   if (!f) { printf("無法寫入 %s\n", outPath); return 1; }
   const uint32_t dataBytes = (uint32_t)(pcm.size() * 2);

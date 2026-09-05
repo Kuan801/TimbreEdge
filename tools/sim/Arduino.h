@@ -1,6 +1,6 @@
 // ============================================================================
-//  tools/sim/Arduino.h  -  給桌機模擬器用的最小 Arduino 相容層
-//  只是為了能在電腦上編譯 / 跑同一份 DSP 程式碼，不會燒進 Teensy。
+//  tools/sim/Arduino.h  -  minimal Arduino compatibility layer for the desktop simulator
+//  Only there so the same DSP code compiles / runs on a PC; never flashed to a Teensy.
 // ============================================================================
 #pragma once
 
@@ -23,9 +23,9 @@ static inline void     delay(uint32_t ms) { sim_micros += (uint64_t)ms * 1000ULL
 #define LOW  0
 #define HIGH 1
 
-// Teensy 的 Print.h 會定義這幾個巨集。模擬器一定要跟著定義，否則會出現
-// 「桌機編得過、Teensy 編不過」的情況 —— 曾經有個區域變數叫 DEC，撞上
-// Print.h 的 #define DEC 10，直到燒錄時才發現。
+// Teensy's Print.h defines these macros. The simulator must define them too, or you get
+// "builds on the desktop, fails on the Teensy" -- there was once a local variable named
+// DEC that collided with Print.h's #define DEC 10, and it only surfaced at flash time.
 #define DEC 10
 #define HEX 16
 #define OCT 8

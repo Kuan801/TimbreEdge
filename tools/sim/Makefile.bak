@@ -1,0 +1,171 @@
+# Desktop simulator: renders a chromatic scale to WAV with the same DSP code
+# Usage: make && ./sim out.wav MODEL.BIN note1.wav [note2.wav ...]
+
+CXX      ?= g++
+# No OLED on the desktop, so switch it off (display.cpp compiles to empty functions)
+CXXFLAGS ?= -O2 -std=c++14 -DTC_USE_OLED=0 -I. -Wall -Wno-unused-variable -Wno-format-security
+
+COMMON = sim_support.cpp ../../analyzer.cpp ../../profile.cpp ../../timbre_model.cpp ../../trainer.cpp \
+      ../../additive_synth.cpp ../../score.cpp ../../player.cpp ../../wav_io.cpp \
+      ../../ui.cpp ../../kbd_in.cpp ../../rec_check.cpp ../../trigger.cpp \
+      ../../display.cpp
+
+SRC = sim_main.cpp $(COMMON)
+
+HDR = $(wildcard ../../*.h) $(wildcard *.h)
+
+all: sim xrange ui_test score_test kbd_test display_test bank_test wavname_test wavhdr_test reccheck_test trigger_test setdir_test evict_test usbcheck inocheck chaincheck
+
+sim: $(SRC) $(HDR)
+	$(CXX) $(CXXFLAGS) -o sim $(SRC) -lm
+
+# Train on a narrow pitch range, extrapolate over the whole range, and measure how
+# transposition distance affects the timbre
+xrange: xrange.cpp $(COMMON) $(HDR)
+	$(CXX) $(CXXFLAGS) -o xrange xrange.cpp $(COMMON) -lm
+
+# Menu navigation is a pure state machine — needs neither Arduino nor sim_support
+# The score is a pure data generator, verified directly on the desktop: note count,
+# timeline, pitch range, simultaneous voices
+score_test: score_test.cpp ../../score.cpp ../../score.h
+	$(CXX) $(CXXFLAGS) -o score_test score_test.cpp ../../score.cpp
+
+ui_test: ui_test.cpp ../../ui.cpp ../../ui.h
+	$(CXX) $(CXXFLAGS) -o ui_test ui_test.cpp ../../ui.cpp
+
+# The USB computer keyboard's key mapping is pure logic too. It #includes kbd_in.cpp
+# directly and injects a fake synth, so even "does the Z key send the right pitch"
+# can be verified — on hardware that can only be judged by ear, and the USB Host
+# port has problems anyway, so it is even less of a basis for deciding whether the
+# code is correct.
+kbd_test: kbd_test.cpp ../../kbd_in.cpp ../../kbd_in.h ../../ui.cpp ../../ui.h
+	$(CXX) $(CXXFLAGS) -o kbd_test kbd_test.cpp ../../ui.cpp
+
+# "The menu must not paint over the status panel". When this rule breaks the screen
+# still updates, so it does not look like a hang, but the sampling panel is
+# overwritten in an instant — the user just says "Auto sampling does nothing".
+# display.cpp's status logic lives outside #if TC_USE_OLED, so the desktop can check it.
+display_test: display_test.cpp ../../display.cpp ../../display.h
+	$(CXX) $(CXXFLAGS) -o display_test display_test.cpp ../../display.cpp
+
+# The timbre bank's admission rules and the "changed instrument without clearing" warning.
+# The thresholds were measured from real material (see config.h); this verifies the mechanism.
+# Synthetic profiles need no material files, so it runs on another machine too.
+bank_test: bank_test.cpp ../../profile.cpp ../../profile.h sim_support.cpp
+	$(CXX) $(CXXFLAGS) -o bank_test bank_test.cpp ../../profile.cpp sim_support.cpp ../../wav_io.cpp ../../display.cpp -lm
+
+# "Which files may be deleted". This is the part that must not get it wrong — a bad
+# decision deletes the user's material, and it is irreversible. The rules are
+# deliberately strict: better to miss a deletion than to delete the wrong thing.
+wavname_test: wavname_test.cpp ../../wav_io.cpp ../../wav_io.h sim_support.cpp
+	$(CXX) $(CXXFLAGS) -o wavname_test wavname_test.cpp ../../wav_io.cpp sim_support.cpp ../../display.cpp -lm
+
+# Whether the WAV header is still valid after "power lost mid-recording".
+# The symptom of this rule breaking is very hard to track down: the file still plays
+# on Mac / ffmpeg and only Windows calls it corrupt — easily mistaken for a problem
+# with the player.
+wavhdr_test: wavhdr_test.cpp ../../wav_io.cpp ../../wav_io.h sim_support.cpp
+	$(CXX) $(CXXFLAGS) -o wavhdr_test wavhdr_test.cpp ../../wav_io.cpp sim_support.cpp ../../display.cpp -lm
+
+# Measures the recording chain's frequency response. Give it a reference file plus
+# the same note recorded with your microphone, and it prints the relative gain per
+# band. The point is to turn "it sounds a bit off" into a number you can track; you
+# can measure as you go while adjusting the microphone position.
+chaincheck: chaincheck.cpp $(COMMON) $(HDR)
+	$(CXX) $(CXXFLAGS) -o chaincheck chaincheck.cpp $(COMMON) -lm
+
+# Measurement tool (not a test): prints the pairwise timbre distance distribution of
+# the material, used to decide the warning threshold.
+# Re-run it when the material changes and update that set of numbers in config.h.
+# Who to sacrifice when the timbre bank is full: it fails silently, and evicting the
+# wrong one only leaves some pitch region with no material to use
+evict_test: evict_test.cpp ../../profile.cpp sim_support.cpp ../../wav_io.cpp ../../display.cpp $(HDR)
+	$(CXX) $(CXXFLAGS) -o evict_test evict_test.cpp ../../profile.cpp sim_support.cpp ../../wav_io.cpp ../../display.cpp -lm
+
+# Sampling folders are an irreversible operation: a miscounted number overwrites the
+# previous round, and a wrong path deletes the user's material.
+# Run it through the desktop SD emulation layer in a temp directory, including a
+# negative control for "did anything get deleted that shouldn't have been".
+setdir_test: setdir_test.cpp ../../wav_io.cpp sim_support.cpp ../../display.cpp $(HDR)
+	$(CXX) $(CXXFLAGS) -o setdir_test setdir_test.cpp ../../wav_io.cpp sim_support.cpp ../../display.cpp -lm
+
+# The trigger decision is a pure state machine. On the real hardware, "recording all
+# the time with nobody playing" takes several minutes of sitting and waiting to see;
+# the desktop feeds synthetic signal and finishes in two seconds, and it tells a
+# threshold problem apart from a re-arming problem.
+trigger_test: trigger_test.cpp ../../trigger.cpp ../../trigger.h ../../config.h
+	$(CXX) $(CXXFLAGS) -o trigger_test trigger_test.cpp ../../trigger.cpp -lm
+
+# The recording verdict is pure numeric rules; change a threshold and both the
+# positive and the negative cases must be verifiable immediately
+reccheck_test: reccheck_test.cpp ../../rec_check.cpp ../../rec_check.h
+	$(CXX) $(CXXFLAGS) -o reccheck_test reccheck_test.cpp ../../rec_check.cpp -lm
+
+# Run the verdict over real material (analyzer + rules hooked up end to end)
+recscan: recscan.cpp $(COMMON) $(HDR)
+	$(CXX) $(CXXFLAGS) -o recscan recscan.cpp $(COMMON) -lm
+
+envdist: envdist.cpp $(COMMON) $(HDR)
+	$(CXX) $(CXXFLAGS) -o envdist envdist.cpp $(COMMON) -lm
+
+# Compile kbd_in.cpp's USB Host path once against a fake USBHost_t36.
+# Normally that section is skipped by TC_USE_USB_KBD=0, and compiling on the desktop
+# is no guarantee it compiles for the Teensy — this target exists to catch that class
+# of error before flashing (e.g. colliding with #define DEC in Print.h).
+usbcheck: ../../kbd_in.cpp ../../kbd_in.h ../../config.h fake_usbhost/USBHost_t36.h
+	$(CXX) $(CXXFLAGS) -DTC_USE_USB_KBD=1 -Ifake_usbhost -fsyntax-only ../../kbd_in.cpp
+	@echo "usbcheck: kbd_in.cpp 的 USB Host 路徑編譯通過"
+	@# --- 上面那一行自己補了 -DTC_USE_USB_KBD=1，所以它「永遠」在測活的那條路。
+	@# 測試把自己要驗的前提補上了，於是漏掉了真正發生過的那個 bug：
+	@# kbd_in.cpp 忘了 include config.h，巨集沒定義，#if 當成 0，
+	@# 整段 USB Host 被靜靜編掉換成兩個空函式 —— 編得過、燒得進、插鍵盤沒反應。
+	@#
+	@# 所以要另外驗一次「不給任何 -D，只靠 config.h 自己決定」的情況：
+	@# 假裝在 Teensy 上（__IMXRT1062__），展開之後 usbHost.begin 必須還在。
+	@if [ "$$($(CXX) $(CXXFLAGS) -D__IMXRT1062__ -Ifake_usbhost -E ../../kbd_in.cpp 2>/dev/null | grep -c 'usbHost.begin')" -eq 0 ]; then \
+	    echo "usbcheck: 失敗 —— Teensy 路徑上 USB Host 區段被編掉了（config.h 沒進來？）"; \
+	    exit 1; \
+	fi
+	@echo "usbcheck: Teensy 路徑上 USB Host 區段確實有被編進去"
+
+# Compile TimbreClone.ino once on the desktop.
+#
+# The .ino was long the only file with no compile coverage, and it has already let
+# two errors through: the menu page count declared one item short of the actual list,
+# and gUiOctave declared after the point where it is used. The latter is especially
+# easy to hit — Arduino's preprocessing only fills in function prototypes
+# automatically, not variable declarations, so inside an .ino the position of a
+# variable is meaningful, which ordinary C++ instincts never suggest.
+#
+# The extension has to be changed to .cpp for g++ to recognise it.
+#
+# One honest difference: g++ is stricter than Arduino — Arduino fills in function
+# prototypes automatically, g++ does not. So "a function used before its definition"
+# errors here while Arduino accepts it. If you really hit that, add a forward
+# declaration in the .ino yourself (uiRenderFwd in that file is handled exactly that
+# way); do not change this target.
+inocheck: ../../TimbreClone.ino $(HDR) Audio.h Wire.h fake_usbhost/USBHost_t36.h
+	@cp ../../TimbreClone.ino ./_inocheck.cpp
+	@$(CXX) $(CXXFLAGS) -DTC_INO_CHECK=1 -DTC_USE_USB_KBD=1 \
+	        -Ifake_usbhost -I../.. -fsyntax-only ./_inocheck.cpp
+	@rm -f ./_inocheck.cpp
+	@echo "inocheck: TimbreClone.ino 語法檢查通過"
+
+# The same .ino, but with the USB Type faked as "Serial + MTP Disk", so the code
+# under #if TC_HAS_MTP gets compiled once as well.
+#
+# Without this target the MTP section has zero compile coverage — the ordinary
+# inocheck never reaches it, and the only thing that does is the 90 seconds after the
+# user presses upload. fake_usbhost exists for exactly the same reason; the stand-in
+# for MTP_Teensy.h lives in fake_mtp/.
+inocheck-mtp: ../../TimbreClone.ino $(HDR) Audio.h Wire.h fake_usbhost/USBHost_t36.h fake_mtp/MTP_Teensy.h
+	@cp ../../TimbreClone.ino ./_inocheck_mtp.cpp
+	@$(CXX) $(CXXFLAGS) -DTC_INO_CHECK=1 -DTC_USE_USB_KBD=1 -DUSB_MTPDISK_SERIAL=1 \
+	        -Ifake_usbhost -Ifake_mtp -I../.. -fsyntax-only ./_inocheck_mtp.cpp
+	@rm -f ./_inocheck_mtp.cpp
+	@echo "inocheck-mtp: TimbreClone.ino（USB Type = Serial + MTP Disk）語法檢查通過"
+
+clean:
+	rm -f sim recscan xrange ui_test score_test kbd_test display_test bank_test wavname_test wavhdr_test reccheck_test trigger_test setdir_test evict_test envdist chaincheck _inocheck.cpp _inocheck_mtp.cpp
+
+.PHONY: clean all

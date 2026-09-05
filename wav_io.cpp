@@ -35,7 +35,7 @@ void tcSdList() {
     File e = dir.openNextFile();
     if (!e) break;
     const char *nm = e.name();
-    if (nm && nm[0] != '.') {                       // 跳過 macOS 的隱藏檔
+    if (nm && nm[0] != '.') {                       // skip macOS hidden files
       if (e.isDirectory()) {
         Serial.printf("  %-24s      <DIR>\n", nm);
       } else {
@@ -88,8 +88,9 @@ int tcSdCollectWavs(const char *dir, char *outNames, int maxCount, const char *s
     bool isDir = e.isDirectory();
     if (nm && !isDir && nm[0] != '.' && endsWithWav(nm) &&
         !(skipName && sameNameCI(nm, skipName))) {
-      // 檔名太長就整個跳過，不要截斷 —— 截斷後之後開檔一定失敗，
-      // 而且會變成很難查的「檔案明明在卻找不到」。
+      // Skip an over-long filename entirely rather than truncate it -- a
+      // truncated name always fails to open later, and turns into a baffling
+      // "the file is plainly there but cannot be found".
       if (strlen(nm) >= TC_MAX_NAME_LEN) {
         Serial.printf("[SD] 檔名過長，跳過：%s（上限 %d 字元）\n", nm, TC_MAX_NAME_LEN - 1);
       } else {
@@ -102,7 +103,7 @@ int tcSdCollectWavs(const char *dir, char *outNames, int maxCount, const char *s
   }
   d.close();
 
-  // 依檔名排序，讓多次執行的載入順序一致（訓練結果才可重現）
+  // Sort by filename so the load order is identical on every run (so training results reproduce)
   for (int i = 1; i < n; i++) {
     char key[TC_MAX_NAME_LEN];
     snprintf(key, TC_MAX_NAME_LEN, "%s", outNames + (size_t)i * TC_MAX_NAME_LEN);
@@ -138,7 +139,7 @@ bool tcSdCopy(const char *src, const char *dst) {
   return total > 44;
 }
 
-// ------------------------------------------------------------------ 小工具 --
+// ----------------------------------------------------------------- helpers --
 static uint32_t rd32(File &f) {
   uint8_t b[4];
   f.read(b, 4);
@@ -150,7 +151,7 @@ static uint16_t rd16(File &f) {
   return (uint16_t)b[0] | ((uint16_t)b[1] << 8);
 }
 
-// ==================================================================== 讀取 ==
+// ==================================================================== read ==
 bool WavReader::open(const char *path) {
   close();
   _f = SD.open(path, FILE_READ);
@@ -229,17 +230,17 @@ uint32_t WavReader::readMono(uint32_t frameIndex, float *dst, uint32_t n) {
     for (uint32_t i = 0; i < gotFrames; i++) {
       int32_t s;
       if (_channels == 1) s = buf[i];
-      else                s = ((int32_t)buf[i * 2] + (int32_t)buf[i * 2 + 1]) / 2;   // 混成 mono
+      else                s = ((int32_t)buf[i * 2] + (int32_t)buf[i * 2 + 1]) / 2;   // mix down to mono
       dst[done + i] = (float)s * (1.0f / 32768.0f);
     }
     done += gotFrames;
     if (gotFrames < k) break;
   }
-  for (uint32_t i = done; i < n; i++) dst[i] = 0.0f;      // 補零
+  for (uint32_t i = done; i < n; i++) dst[i] = 0.0f;      // zero-pad
   return done;
 }
 
-// ==================================================================== 寫入 ==
+// =================================================================== write ==
 static void wr32(File &f, uint32_t v) {
   uint8_t b[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
   f.write(b, 4);
@@ -259,7 +260,7 @@ bool WavWriter::open(const char *path, uint32_t sampleRate, uint16_t channels,
   _channels   = channels;
   _dataBytes  = 0;
 
-  const uint32_t preBytes = expectedSamples * 2u;   // 先寫入的預估 data 長度
+  const uint32_t preBytes = expectedSamples * 2u;   // the estimated data length written up front
   _f.write((const uint8_t *)"RIFF", 4);  wr32(_f, 36 + preBytes);
   _f.write((const uint8_t *)"WAVE", 4);
   _f.write((const uint8_t *)"fmt ", 4);  wr32(_f, 16);
@@ -283,29 +284,33 @@ bool WavWriter::writeSamples(const int16_t *src, uint32_t n) {
 }
 
 // ---------------------------------------------------------------------------
-//  錄製途中就把長度補正
+//  Patch the length while the recording is still running
 //
-//  標頭在 open() 時寫的是「預估長度」（StereoCapture 沒有預估值，寫的是 0），
-//  真正的長度本來只在 close() 補。問題是這樣有一個很難查的失敗模式：
-//  演奏／錄音還沒結束就斷電、按 reset、或直接把 SD 卡拔起來 —— 音訊資料
-//  明明已經寫進去好幾 MB，但標頭裡的 data 長度還是 0。
+//  What open() writes into the header is an "estimated length" (StereoCapture
+//  has no estimate and writes 0); the real length used to be patched only in
+//  close(). The trouble is that this leaves a failure mode that is very hard to
+//  track down: power loss, a reset press, or the SD card pulled out before the
+//  performance/recording ends -- several MB of audio are already written, but
+//  the data length in the header is still 0.
 //
-//  這種檔案在不同播放器上的行為不一樣，而那正是它難查的地方：
-//    Windows 檔案總管 / Media Player  -> 判定損毀，不給播
-//    ffmpeg / QuickTime / Audacity    -> 會自己掃到檔尾，照樣播得出來
-//  於是「在 Mac 上明明聽得到，拿到 Windows 就說檔案壞掉」。
+//  Such a file behaves differently in different players, and that is exactly
+//  what makes it hard to diagnose:
+//    Windows Explorer / Media Player  -> calls it corrupt, refuses to play it
+//    ffmpeg / QuickTime / Audacity    -> scan to the end themselves, play fine
+//  Hence "it plays fine on the Mac, but Windows says the file is broken".
 //
-//  解法是錄製途中定期回頭把長度補到「目前為止」並 flush。成本是每次一個
-//  seek 加 8 個位元組再加一次 flush；recorder.cpp 每 2 秒做一次，
-//  相對於 176 KB/s 的寫入量可以忽略。斷電的話最多只損失最後 2 秒。
+//  The fix is to seek back periodically during recording, patch the length to
+//  "so far" and flush. The cost is one seek plus 8 bytes plus one flush per
+//  time; recorder.cpp does it every 2 seconds, negligible against the 176 KB/s
+//  write rate. On power loss at most the last 2 seconds are lost.
 // ---------------------------------------------------------------------------
 void WavWriter::flushHeader() {
   if (!_open) return;
-  const uint32_t pos = _f.position();      // 記住目前寫到哪
+  const uint32_t pos = _f.position();      // remember how far we have written
   _f.seek(4);   wr32(_f, 36 + _dataBytes);
   _f.seek(40);  wr32(_f, _dataBytes);
-  _f.seek(pos);                            // 一定要回到原位，否則接下來會蓋掉自己
-  _f.flush();                              // 不 flush 的話補正的位元組還在快取裡，斷電照樣丟失
+  _f.seek(pos);                            // must go back to where we were, or the following writes overwrite ourselves
+  _f.flush();                              // without the flush the patched bytes sit in cache and are lost on power failure anyway
 }
 
 void WavWriter::close() {
@@ -316,31 +321,34 @@ void WavWriter::close() {
 }
 
 // ---------------------------------------------------------------------------
-//  程式自己產生的音檔長什麼樣子
+//  What an audio file generated by the program itself looks like
 //
-//  只認兩種：
-//    1) 固定檔名  REC.WAV（麥克風錄音）、PLAY.WAV（半音階成品）、
-//       CANON.WAV（卡農成品）。CANON.WAV 一度是 PLAY.WAV 的舊名，
-//       卡農樂譜接回來之後它又是現役檔名了 —— 兩種情況都要認得
-//    2) 純音名    C4.WAV、Db4.WAV、A3.WAV …（採樣模式自動命名的）
+//  Only two forms are recognised:
+//    1) fixed names  REC.WAV (microphone recording), PLAY.WAV (chromatic scale
+//       output), CANON.WAV (canon output). CANON.WAV was once the old name of
+//       PLAY.WAV, and now that the canon score is back it is a live name again
+//       -- both cases have to be recognised
+//    2) bare note names  C4.WAV, Db4.WAV, A3.WAV … (auto-named by sampling mode)
 //
-//  使用者自己丟進去的素材（Piano.mf.C4.wav、Trumpet.vib.ff.C4.stereo.wav）
-//  都有前綴，不會落進第 2 類，所以刪不到。這一點很重要 ——
-//  誤刪別人辛苦錄的素材是不可逆的，寧可規則嚴一點、漏刪幾個檔。
+//  Material the user dropped in themselves (Piano.mf.C4.wav,
+//  Trumpet.vib.ff.C4.stereo.wav) all carries a prefix and never falls into form
+//  2, so it can never be deleted. That matters a lot -- deleting someone's
+//  painstakingly recorded material by mistake is irreversible, so keep the rule
+//  strict and miss a few files instead.
 // ---------------------------------------------------------------------------
 bool tcIsGeneratedWav(const char *nm) {
   if (!nm) return false;
 
-  // 副檔名必須是 .WAV（不分大小寫）
+  // The extension must be .WAV (case-insensitive)
   const size_t len = strlen(nm);
   if (len < 5) return false;
   if (strcasecmp(nm + len - 4, ".WAV") != 0) return false;
 
   if (strcasecmp(nm, TC_REC_PATH) == 0 || strcasecmp(nm, "REC.WAV") == 0)   return true;
   if (strcasecmp(nm, TC_PLAY_PATH) == 0 || strcasecmp(nm, TC_CANON_PATH) == 0) return true;
-  if (strcasecmp(nm, "CANON.WAV") == 0) return true;   // 舊卡上的舊檔名
+  if (strcasecmp(nm, "CANON.WAV") == 0) return true;   // the old name on older cards
 
-  // 純音名：字母 A~G，可接一個 b 或 #，再接 1~2 位數字，然後就結束
+  // Bare note name: a letter A~G, optionally one b or #, then 1~2 digits, then the end
   size_t i = 0;
   const char c = (char)toupper((unsigned char)nm[i]);
   if (c < 'A' || c > 'G') return false;
@@ -352,7 +360,7 @@ bool tcIsGeneratedWav(const char *nm) {
 }
 
 // ============================================================================
-//  採樣資料夾 SETnn
+//  Sampling folders SETnn
 // ============================================================================
 bool tcIsSetDir(const char *nm) {
   if (!nm) return false;
@@ -363,11 +371,12 @@ bool tcIsSetDir(const char *nm) {
 }
 
 bool tcSdMakeNextSet(char *out, size_t cap) {
-  // 用 SD.exists() 一個一個試，不掃目錄。
+  // Probe one at a time with SD.exists(); do not scan the directory.
   //
-  // 掃目錄再取最大值看起來比較聰明，但那樣有個洞：使用者手動刪掉 SET02 之後，
-  // 最大值仍然是 SET03，下一個會給 SET04 —— SET02 那個號碼就永遠空著。
-  // 逐一試就會補進去 SET02。號碼連續，人比較好認。
+  // Scanning and taking the maximum looks smarter, but it has a hole: once the
+  // user manually deletes SET02 the maximum is still SET03, the next one handed
+  // out is SET04 -- and the number SET02 stays empty forever. Probing in order
+  // fills SET02 back in. Consecutive numbers are easier for people to read.
   for (int i = 1; i <= TC_SET_MAX; i++) {
     char name[12];
     snprintf(name, sizeof(name), "%s%02d", TC_SET_PREFIX, i);
@@ -398,7 +407,7 @@ int tcSdCollectSets(char *outNames, int maxCount) {
   }
   d.close();
 
-  // 排序，讓選單每次的順序一致
+  // sort, so the menu order is the same every time
   for (int i = 1; i < n; i++) {
     char key[TC_MAX_NAME_LEN];
     snprintf(key, TC_MAX_NAME_LEN, "%s", outNames + (size_t)i * TC_MAX_NAME_LEN);
@@ -418,8 +427,9 @@ bool tcSdRemoveDir(const char *dir, int *deletedFiles, uint32_t *freedBytes) {
   if (freedBytes)   *freedBytes   = 0;
   if (!dir || !dir[0]) return false;
 
-  // 先掃一遍收集檔名再刪。邊迭代邊刪目錄項目在 FAT 上行為未定義，
-  // 實務上會漏掉一半的檔案 —— purgeGeneratedWavs() 已經踩過這個坑。
+  // Scan once to collect the names first, then delete. Deleting directory
+  // entries while iterating over them is undefined on FAT and in practice
+  // misses half the files -- purgeGeneratedWavs() already fell into this hole.
   static char victims[TC_MAX_SCAN_FILES][TC_MAX_NAME_LEN];
   int nv = 0;
   uint32_t freed = 0;

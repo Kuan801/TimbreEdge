@@ -6,33 +6,37 @@
 #include <string.h>
 
 // ============================================================================
-//  門檻是怎麼訂出來的
+//  How these thresholds were chosen
 //
-//  這一節的數字全部來自實際錄壞的檔案，不是憑感覺訂的。素材是「用手機喇叭
-//  播放鋼琴 C4 給麥克風收音」的兩份 REC.WAV，以及乾淨的 Iowa MIS 原始素材。
+//  Every number in this section comes from real bad takes, not from intuition.
+//  The material is two REC.WAV files of "a piano C4 played through a phone
+//  speaker into the microphone", plus the clean Iowa MIS originals.
 //
-//    第一份 REC.WAV   峰值 1.000、203 個削波樣本（佔比 0.0023）
-//                     動態範圍 2.9 dB（原始素材 24.5 dB）
-//                     -> 波形被削平，量到的諧波幾乎都是削波產生的假諧波
-//    第二份 REC.WAV   峰值 0.089、沒有削波，但觸發早了 1.7 秒
-//                     觸發的是 30~190 Hz 的環境低頻，訊噪比只有 7 dB
-//                     -> 2 秒的錄音裡只有最後 0.3 秒是真正的音
+//    First REC.WAV    peak 1.000, 203 clipped samples (0.0023 of the file)
+//                     dynamic range 2.9 dB (the original source is 24.5 dB)
+//                     -> the waveform is flattened and almost every harmonic
+//                        measured is an artifact of the clipping
+//    Second REC.WAV   peak 0.089, no clipping, but the trigger fired 1.7 s early
+//                     it triggered on 30~190 Hz room rumble, SNR only 7 dB
+//                     -> of a 2 s recording, only the last 0.3 s is the actual note
 //
-//  兩份的 peak 一個太大一個太小，靠單一個指標都抓不到「另一種」錯誤。
-//  所以判定要同時看削波、音量、訊噪比、起音次數四件事。
+//  One has too high a peak and the other too low, so no single metric catches
+//  both kinds of failure. The verdict therefore looks at clipping, level, SNR and
+//  onset count together.
 //
-//  一個誠實的限制：這些門檻抓得到「錄音鏈壞掉」這種量級的問題，
-//  抓不到「錄得還行但不夠好」。它是體檢，不是評分。
+//  An honest limitation: these thresholds catch failures on the scale of "the
+//  recording chain is broken", not "usable but not good enough". This is a health
+//  check, not a grade.
 // ============================================================================
 
-#define CLIP_BAD        0.0005f   // 削波佔比。0.05% 已經是連續好幾段平頂了
-#define PEAK_TOO_LOW    0.05f     // 低於這個，量化雜訊在諧波裡的比重開始失控
-#define PEAK_LOW        0.15f     // 還能分析，但 SNR 已經不理想
-#define PEAK_HOT        0.90f     // 還沒削波，但下一次大聲一點就會
-#define NOISE_BAD       0.10f     // 訊噪比 20 dB。第二份 REC.WAV 是 0.45（7 dB）
-#define NOISE_WARN      0.032f    // 訊噪比 30 dB
-#define DUR_TOO_SHORT   0.35f     // 短於這個，包絡量不出衰減走勢
-#define DUR_SHORT       0.90f     // config.h 的量測：1.0 秒開始，包絡相關性掉到 0.891
+#define CLIP_BAD        0.0005f   // Clipped fraction. At 0.05% there are already several flat-topped stretches
+#define PEAK_TOO_LOW    0.05f     // Below this, quantization noise in the harmonics starts to get out of hand
+#define PEAK_LOW        0.15f     // Still analyzable, but the SNR is no longer good
+#define PEAK_HOT        0.90f     // Not clipped yet, but one louder take and it will be
+#define NOISE_BAD       0.10f     // SNR 20 dB. The second REC.WAV was 0.45 (7 dB)
+#define NOISE_WARN      0.032f    // SNR 30 dB
+#define DUR_TOO_SHORT   0.35f     // Shorter than this and the envelope cannot show a decay trend
+#define DUR_SHORT       0.90f     // Measured in config.h: from 1.0 s, envelope correlation drops to 0.891
 
 static void put(char *dst, size_t cap, const char *fmt, ...) {
   if (!dst || !cap) return;
@@ -63,10 +67,11 @@ RecVerdict recCheckEval(const RecCheck &in,
   if (reason && reasonCap) reason[0] = 0;
   if (fix    && fixCap)    fix[0]    = 0;
 
-  // ---- 不能用 -------------------------------------------------------------
+  // ---- unusable -----------------------------------------------------------
   //
-  // 順序是按「使用者能多快改掉」排的，不是按嚴重程度。同時中兩條的時候，
-  // 先講最好改的那一條 —— 一次只給一件事做，比列出三個問題有用。
+  // Ordered by how quickly the user can fix it, not by severity. When two rules
+  // fire at once, report the easiest fix first -- giving them one thing to do is
+  // more useful than listing three problems.
   if (!in.analysisOk) {
     put(reason, reasonCap, "analysis failed");
     put(fix,    fixCap,    "play louder / longer");
@@ -85,12 +90,14 @@ RecVerdict recCheckEval(const RecCheck &in,
     return REC_BAD;
   }
 
-  // 「峰值低」本身不是問題，「峰值低而且埋在噪音裡」才是。
+  // A low peak is not a problem in itself; a low peak buried in noise is.
   //
-  // 這一條原本只看峰值，結果把 Iowa MIS 的鋼琴原始素材判成不能用 ——
-  // 那批檔案峰值只有 0.033，但訊噪比 40 dB，是拿來當基準的乾淨素材。
-  // 錄音室母帶的絕對電平本來就可以很低，那是後製的事，不是品質問題。
-  // 真正會毀掉分析的是量化雜訊爬進諧波裡，而那件事訊噪比看得到、峰值看不到。
+  // This rule originally looked only at the peak, and duly declared the clean
+  // Iowa MIS piano originals unusable -- those files peak at just 0.033 but have
+  // 40 dB SNR and are the reference material. A studio master is allowed to sit
+  // at a low absolute level; that is a mastering decision, not a quality problem.
+  // What actually ruins the analysis is quantization noise creeping into the
+  // harmonics, and SNR sees that while peak does not.
   if (in.peak < PEAK_TOO_LOW &&
       recCheckSnrKnown(in.noiseFloor) && recCheckSnrDb(in.noiseFloor) < 26.0f) {
     put(reason, reasonCap, "too quiet: peak %.2f", in.peak);
@@ -110,7 +117,7 @@ RecVerdict recCheckEval(const RecCheck &in,
     return REC_BAD;
   }
 
-  // ---- 能用，但可以更好 ---------------------------------------------------
+  // ---- usable, but could be better ----------------------------------------
   if (in.peak > PEAK_HOT) {
     put(reason, reasonCap, "hot: peak %.2f", in.peak);
     put(fix,    fixCap,    "lower gain a bit (g)");
@@ -135,9 +142,11 @@ RecVerdict recCheckEval(const RecCheck &in,
     return REC_WARN;
   }
 
-  // 衰減 >= 0.97 表示「這個音幾乎不衰減」。真的有這種樂器（管風琴、長音弦樂），
-  // 所以不是錯誤 —— 但撥弦樂器量到這個值，八成是尾巴被切掉或錄到持續的噪音。
-  // 只提醒，不判定，因為程式並不知道使用者手上拿的是什麼。
+  // A decay >= 0.97 means "this note barely decays at all". Such instruments do
+  // exist (organ, sustained strings), so this is not an error -- but on a plucked
+  // instrument it usually means the tail was cut off or a steady noise was
+  // recorded. Warn only, never fail, because the code has no idea what the user
+  // is holding.
   if (in.decayPerSec >= 0.97f) {
     put(reason, reasonCap, "no decay measured");
     put(fix,    fixCap,    "ok for organ or bowed");

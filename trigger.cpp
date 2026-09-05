@@ -4,7 +4,7 @@
 
 float tcBlockLevel(const int16_t *src, int n) {
   if (!src || n <= 0) return 0.0f;
-  // 維持前 K 大（遞減）。K 只有 4，直接插入排序，每個取樣最多比 4 次。
+  // Keep the top K (descending). K is only 4, so plain insertion sort -- at most 4 compares per sample.
   float top[TC_BLOCK_TOPK];
   for (int i = 0; i < TC_BLOCK_TOPK; i++) top[i] = 0.0f;
   for (int i = 0; i < n; i++) {
@@ -18,7 +18,7 @@ float tcBlockLevel(const int16_t *src, int n) {
       }
     }
   }
-  // 取樣數少於 K 時沒有東西可以剔除，退回最大值
+  // With fewer than K samples there is nothing to reject, so fall back to the maximum
   return (n >= TC_BLOCK_TOPK) ? top[TC_BLOCK_TOPK - 1] : top[0];
 }
 
@@ -27,9 +27,9 @@ void TriggerGate::recomputeThreshold() {
   _thresh = (fromAmbient > _base) ? fromAmbient : _base;
 }
 
-// 「安靜」= 回到環境噪音的水準，不是「門檻的某個比例」。
-// 理由寫在 config.h 的 TC_TRIG_QUIET_MARGIN —— 用門檻當基準會讓環境噪音
-// 自己就跨過安靜線，於是永遠武裝不起來。
+// "Quiet" = back down to the ambient noise level, not "some fraction of the threshold".
+// The reasoning is under TC_TRIG_QUIET_MARGIN in config.h -- basing it on the threshold lets
+// the ambient noise cross the quiet line by itself, so it never manages to arm.
 float TriggerGate::quietLevel() const {
   const float fromAmbient = _ambient * TC_TRIG_QUIET_MARGIN;
   const float fromBase    = _base * TC_TRIG_QUIET_FRAC;
@@ -55,8 +55,8 @@ void TriggerGate::arm(float baseThreshold, uint32_t nowMs) {
 }
 
 void TriggerGate::noteRecorded(uint32_t nowMs) {
-  // 錄完的當下，音還在響。清掉武裝並重新開始計算安靜時間，
-  // 尾巴就不會被當成下一個音。
+  // The note is still sounding the moment recording ends. Clear the armed state and restart
+  // the quiet timer, so the tail isn't taken for the next note.
   _rearmed    = false;
   _quiet      = false;
   _hot        = 0;
@@ -66,14 +66,14 @@ void TriggerGate::noteRecorded(uint32_t nowMs) {
 bool TriggerGate::feed(float blockPeak, uint32_t nowMs) {
   _level = _level * 0.7f + blockPeak * 0.3f;
 
-  // ---- 開頭先聽一段，量這個房間有多吵 ------------------------------------
+  // ---- Listen for a moment first, to measure how noisy this room is ------
   //
-  // 用高百分位而不是平均：會誤觸發的是尖峰，不是平均值。但也不能用最大值
-  // —— 一個孤立的數位尖峰就會把環境估到天上去，之後永遠觸發不了。
-  // 保留最大的 CAL_KEEP 個，最後取其中最小的那個（≈96 百分位）。
-  // 詳細理由見 trigger.h 的 CAL_KEEP 說明。
+  // A high percentile rather than the mean: what causes false triggers is peaks, not averages.
+  // But not the maximum either -- one isolated digital spike would put the ambient estimate
+  // through the roof and it would never trigger again. Keep the largest CAL_KEEP values and take
+  // the smallest of those (≈96th percentile). Full reasoning in the CAL_KEEP notes in trigger.h.
   if (_calibrating) {
-    // 插入排序維持遞減。CAL_KEEP 只有 8，每個 block 最多比 8 次。
+    // Insertion sort, kept descending. CAL_KEEP is only 8, at most 8 compares per block.
     for (int i = 0; i < CAL_KEEP; i++) {
       if (blockPeak > _calTop[i]) {
         for (int j = CAL_KEEP - 1; j > i; j--) _calTop[j] = _calTop[j - 1];
@@ -84,25 +84,25 @@ bool TriggerGate::feed(float blockPeak, uint32_t nowMs) {
     if (_calN < 1000000) _calN++;
     if ((int32_t)(nowMs - _calUntil) >= 0) {
       _calibrating = false;
-      // block 數少於 CAL_KEEP 時沒有足夠樣本可以剔除離群值（600 ms 正常有
-      // 約 200 個，只有測試會走到這裡），那就退回「手上最小的那個」。
+      // With fewer blocks than CAL_KEEP there aren't enough samples to reject outliers (600 ms
+      // normally gives about 200; only tests get here), so fall back to "the smallest one we have".
       const int idx = (_calN >= CAL_KEEP) ? (CAL_KEEP - 1)
                                           : (_calN > 0 ? _calN - 1 : 0);
       _ambient = _calTop[idx];
-      // 被剔除掉的那幾個裡面，有多少是「遠高於環境」的真尖峰。
-      // 門檻已經不受它們影響，但它們本身是硬體徵兆，要報出來。
+      // Of the values that got rejected, how many were real peaks "far above ambient".
+      // The threshold no longer depends on them, but they are a hardware symptom in themselves, so report them.
       _calSpikes = 0;
       for (int i = 0; i < idx; i++)
         if (_calTop[i] > _ambient * 4.0f) _calSpikes++;
       recomputeThreshold();
-      // 剛剛那 600 ms 就是一段觀察過的安靜，可以省掉再等 400 ms。
+      // Those 600 ms were already an observed stretch of quiet, so the extra 400 ms wait can be skipped.
       //
-      // 判準是「環境低於使用者設的下限」。不能拿 _thresh 來比 ——
-      // _thresh 本來就是 _ambient × 1.5，那個比較永遠成立，等於沒判。
-      // （這一條是桌機測試抓到的：校正期間餵滿格訊號，它照樣說已武裝。）
+      // The test is "ambient below the floor the user set". It cannot compare against _thresh --
+      // _thresh is _ambient × 1.5 by construction, so that comparison always holds and decides nothing.
+      // (A desktop test caught this one: feed a full-scale signal during calibration and it still said armed.)
       //
-      // 環境比使用者設的下限還吵，代表這個房間的噪音已經到訊號等級了。
-      // 那就走正常流程：等一段真正的安靜再說，順便讓使用者看到門檻被抬高。
+      // Ambient noisier than the user's floor means this room's noise is already at signal level.
+      // Then take the normal path: wait for a genuine stretch of quiet, and let the user see the threshold go up.
       _rearmed    = (_ambient < _base);
       _quiet      = _rearmed;
       _quietSince = nowMs;
@@ -110,14 +110,14 @@ bool TriggerGate::feed(float blockPeak, uint32_t nowMs) {
     return false;
   }
 
-  // ---- 安靜追蹤（武裝的唯一條件）------------------------------------------
+  // ---- Quiet tracking (the only condition for arming) ---------------------
   if (blockPeak < quietLevel()) {
     if (!_quiet) { _quiet = true; _quietSince = nowMs; }
     if ((int32_t)(nowMs - _quietSince) >= (int32_t)TC_REARM_SILENT_MS) {
       _rearmed = true;
-      // 安靜的時候才讓環境估計值跟著走。係數很慢（每個 block 0.5%，
-      // 2.9 ms 一格 → 時間常數約 0.6 秒），這樣風扇轉起來門檻會跟著抬，
-      // 但一個音的起音不足以把它拉高 —— 何況這一段只在「低於門檻」時執行。
+      // Only let the ambient estimate follow along while it is quiet. Very slow coefficient (0.5%
+      // per block, one block per 2.9 ms -> time constant about 0.6 s), so the threshold rises when a
+      // fan starts up, but one note's attack can't lift it -- and this branch only runs below the threshold anyway.
       _ambient = _ambient * 0.995f + blockPeak * 0.005f;
       recomputeThreshold();
     }
@@ -125,7 +125,7 @@ bool TriggerGate::feed(float blockPeak, uint32_t nowMs) {
     _quiet = false;
   }
 
-  // ---- 觸發 ---------------------------------------------------------------
+  // ---- Trigger ------------------------------------------------------------
   if (blockPeak >= _thresh) {
     _hot++;
     if (_hot >= TC_TRIG_BLOCKS && _rearmed) {
@@ -143,8 +143,8 @@ bool TriggerGate::feed(float blockPeak, uint32_t nowMs) {
 
 float TriggerGate::lastHeadroomDb() const {
   if (_lastTrigPk <= 0.0f) return 0.0f;
-  // 環境量到 0 是有可能的（完全安靜的房間 + 沒接麥克風）。
-  // 那種情況下餘裕無限大，回一個大但有限的數字，不要回 inf。
+  // Ambient can legitimately measure 0 (a perfectly silent room + no microphone connected).
+  // Headroom is infinite in that case; return a large but finite number, not inf.
   if (_lastAmb <= 1e-5f) return 99.0f;
   return 20.0f * log10f(_lastTrigPk / _lastAmb);
 }

@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 # =============================================================================
-#  resid_pos.py  -  殘差落在哪個「絕對頻率」上
+#  resid_pos.py  -  which "absolute frequency" the residual sits at
 #
-#  用法
+#  Usage
 #  -----
-#    python3 resid_pos.py --lib /path/to/聲音庫                  # 只看素材
+#    python3 resid_pos.py --lib /path/to/聲音庫                  # samples only
 #    python3 resid_pos.py --lib /path/to/聲音庫 --syn out.wav \
-#            --inst piano --start 60 --count 24                  # 素材 vs 合成
+#            --inst piano --start 60 --count 24                  # samples vs synth
 #
-#  為什麼需要這支：evaluate.py 的「噪聲位置」量的是殘差在四個固定頻帶的
-#  *分佈*（百分比），那是相對量。可是「音頭沙沙聲」是絕對量的問題 ——
-#  某個頻帶的噪聲比樂器自己還大聲。分佈對了不代表位階對了。
+#  Why this exists: evaluate.py's "noise position" measures the *distribution* of the
+#  residual over four fixed bands (as percentages), which is a relative quantity. But
+#  the "attack hiss" is an absolute problem -- in some band the noise is simply louder
+#  than the instrument itself. Getting the distribution right does not mean the level
+#  is right.
 #
-#  這支輸出兩種東西：
-#    1) 殘差能量的 10/50/90 百分位頻率（Hz）—— 殘差「住在哪裡」
-#    2) 各頻帶殘差相對整段能量的絕對位階（dB）—— 合成端可以直接跟素材比
+#  This one prints two things:
+#    1) the 10/50/90th percentile frequencies of the residual energy (Hz) -- where the
+#       residual "lives"
+#    2) the absolute level of the residual per band relative to the whole-segment
+#       energy (dB) -- so the synth side can be compared directly against the samples
 #
-#  實測結論（見 README「起音沙沙聲」一節）：百分位幾乎不隨音高變動，
-#  小號從 165 Hz 到 1007 Hz（2.5 個八度），殘差中位數一直在 1.3~2.0 kHz。
-#  殘差的落點是樂器本體的性質，不是音高的函數。
+#  What the measurements showed (see the "attack hiss" section of the README): the
+#  percentiles barely move with pitch. For the trumpet, from 165 Hz to 1007 Hz (2.5
+#  octaves), the residual median stays at 1.3~2.0 kHz. Where the residual lands is a
+#  property of the instrument itself, not a function of pitch.
 # =============================================================================
 
 import argparse
@@ -35,10 +40,10 @@ BANDS = [(0, 900), (900, 2000), (2000, 5000), (5000, 22050)]
 
 
 def residual(x, f0, t0, dur):
-    """週期差分殘差。回傳 (殘差, 原訊號段)，取不到回 (None, None)。
+    """Period-difference residual. Returns (residual, original signal segment), or (None, None) if it cannot be taken.
 
-    跟 evaluate.py 的 aperiodic() same 想法，但這裡要保留頻譜本身，
-    不只是頻帶佔比。
+    Same idea as evaluate.py's aperiodic(), but here the spectrum itself has to be
+    kept, not just the per-band shares.
     """
     k = int(0.01 * SR)
     e = np.array([np.sqrt(np.mean(x[i:i + k] ** 2))
@@ -53,12 +58,12 @@ def residual(x, f0, t0, dur):
     n = (len(seg) - T) // 1024 * 1024
     if n < 1024:
         return None, None
-    # 除以 sqrt(2)：不相關殘差經過差分之後能量會加倍（E[d^2] = 2E[e^2]）
+    # Divide by sqrt(2): differencing doubles the energy of an uncorrelated residual (E[d^2] = 2E[e^2])
     return (seg[T:T + n] - seg[:n]) / np.sqrt(2.0), seg[:n]
 
 
 def percentiles(res):
-    """殘差能量的 10/50/90 百分位頻率（Hz）。"""
+    """10/50/90th percentile frequencies of the residual energy (Hz)."""
     w = np.hanning(len(res))
     m = np.abs(np.fft.rfft(res * w)) ** 2
     fr = np.fft.rfftfreq(len(res), 1 / SR)
@@ -70,10 +75,11 @@ def percentiles(res):
 
 
 def band_levels(res, sig):
-    """各頻帶的殘差能量，相對「整段訊號總能量」的 dB。
+    """Residual energy per band, in dB relative to the total energy of the whole segment.
 
-    用整段總能量當分母（而不是同頻帶的訊號能量）是刻意的：
-    要比的是「這一層在整個音裡有多大聲」，那才跟遮蔽與否有關。
+    Using the whole-segment total as the denominator (rather than the signal energy in
+    the same band) is deliberate: what we want to compare is "how loud this layer is
+    within the whole note", and that is what decides whether it gets masked.
     """
     w = np.hanning(len(res))
     D = np.abs(np.fft.rfft(res * w)) ** 2

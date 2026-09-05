@@ -7,25 +7,25 @@ MidiInput gMidi;
 
 #include <USBHost_t36.h>
 
-// USBHost 的物件必須是全域的（函式庫在中斷裡會用到），不能放進 class 成員，
-// 所以放在這個 .cpp 的檔案範圍。
+// The USBHost objects have to be global (the library uses them from interrupt context) and
+// cannot be class members, so they live at file scope in this .cpp.
 static USBHost     usbHost;
 static USBHub      usbHub1(usbHost);
-static USBHub      usbHub2(usbHost);        // 有人會透過 hub 接，多留一層
+static USBHub      usbHub2(usbHost);        // Some people connect through a hub, so allow one extra layer
 
 // ---------------------------------------------------------------------------
-//  USB 描述元傾印器
+//  USB descriptor dumper
 //
-//  claim_drivers() 會拿每一個介面去問「所有」還沒認領裝置的驅動程式，而且
-//  就算有人認領了也會繼續問下一個介面。所以只要放一個永遠回傳 false 的
-//  驅動程式在最前面，就能把整台裝置的介面與端點全部印出來，而且完全不會
-//  影響正常的認領流程。
+//  claim_drivers() offers every interface to *all* drivers that have not yet claimed a
+//  device, and it carries on to the next interface even after someone has claimed one. So
+//  a driver that always returns false, placed right at the front, prints out every interface
+//  and endpoint of the whole device without disturbing the normal claim process at all.
 //
-//  這是在「裝置連上了卻收不到資料」時唯一能確定原因的辦法 —— 前面兩次推測
-//  （認領到錯的介面、封包大於 64）都被原始碼推翻了，不能再猜下去。
+//  This is the only way to pin down "the device connects but no data arrives" -- the first two
+//  guesses (wrong interface claimed, packets larger than 64) were refuted by the source; no more guessing.
 //
-//  必須宣告在 MIDIDevice 之前：driver_ready_for_device() 是往串列尾端接，
-//  所以建構順序就是被詢問的順序。
+//  Must be declared before MIDIDevice: driver_ready_for_device() appends to the tail of the
+//  list, so construction order is the order in which drivers get asked.
 // ---------------------------------------------------------------------------
 class UsbDescDump : public USBDriver {
 public:
@@ -53,12 +53,12 @@ protected:
     if (p[5] == 0xFF)           Serial.print(F("   <- 廠商自訂"));
     Serial.println();
 
-    // 往後掃到下一個介面為止，把端點印出來
+    // Scan forward to the next interface, printing the endpoints
     const uint8_t *end = descriptors + len;
     p += 9;
     while (p + 2 <= end && p[0] >= 2) {
-      if (p[1] == 4 || p[1] == 11) break;          // 下一個介面 / IAD
-      if (p[1] == 5 && p[0] >= 7) {                // 端點
+      if (p[1] == 4 || p[1] == 11) break;          // Next interface / IAD
+      if (p[1] == 5 && p[0] >= 7) {                // Endpoint
         const uint16_t mps = p[4] | (p[5] << 8);
         const char *dir = (p[2] & 0x80) ? "IN " : "OUT";
         const char *tp  = (p[3] & 3) == 2 ? "bulk" : (p[3] & 3) == 3 ? "interrupt"
@@ -69,7 +69,7 @@ protected:
       }
       p += p[0];
     }
-    return false;    // 永遠不認領
+    return false;    // Never claim
   }
   void disconnect() override {}
 };
@@ -77,26 +77,26 @@ protected:
 static UsbDescDump usbDump(usbHost);
 
 // ---------------------------------------------------------------------------
-//  為什麼要放「四個」MIDIDevice，而且用 BigBuffer 版本
+//  Why there are *four* MIDIDevice objects, and why the BigBuffer variant
 //
-//  症狀：裝置有列舉出來、product() 讀得到名字，但一則訊息都收不到。
-//  讀 USBHost_t36 的 midi.cpp 之後找到兩個都會造成這個結果的機制：
+//  Symptom: the device enumerates, product() reads back a name, but not a single message
+//  arrives. Reading midi.cpp in USBHost_t36 turned up two mechanisms that both cause this:
 //
-//  1) claim() 是「逐介面」被呼叫的，而且結尾是 return (rxpipe || txpipe)。
-//     很多 USB MIDI 鍵盤是複合裝置，第一個介面是 Audio Control（不是
-//     MIDI Streaming）。那個介面裡的 CS_INTERFACE header 會讓 claim() 把
-//     ismidi 設成 true，如果它剛好又帶一個中斷端點，第一個 MIDIDevice 就會
-//     認領到「錯的介面」—— 於是 (bool) 是 true、名字讀得到，
-//     但真正在送音符的 MIDI Streaming 介面沒有人接手，永遠收不到資料。
-//     解法是多放幾個 MIDIDevice：第一個佔走錯的，第二個就會接到對的。
+//  1) claim() is called *per interface*, and it ends with return (rxpipe || txpipe).
+//     Many USB MIDI keyboards are composite, with Audio Control (not MIDI Streaming) as the
+//     first interface. The CS_INTERFACE header inside it makes claim() set ismidi to true, and
+//     if it happens to carry an interrupt endpoint too, the first MIDIDevice claims the *wrong
+//     interface* -- so (bool) is true and the name reads back fine, but nobody picks up the
+//     MIDI Streaming interface that actually sends the notes, and no data ever arrives.
+//     The fix is more MIDIDevice objects: the first takes the wrong one, the second the right one.
 //
-//  2) claim() 裡有 `if (rx_ep && rx_size <= max_packet_size)`。
-//     MIDIDevice 的 max_packet_size 是 64，MIDIDevice_BigBuffer 是 512。
-//     端點宣告的封包大於 64 時，小版本會靜靜地不建立接收管線，
-//     但只要送出管線建得起來，claim() 還是回傳 true。同樣是「連上了卻沒資料」。
-//     官方範例一律用 BigBuffer，就是為了避開這件事。
+//  2) claim() contains `if (rx_ep && rx_size <= max_packet_size)`.
+//     max_packet_size is 64 on MIDIDevice and 512 on MIDIDevice_BigBuffer. When the endpoint
+//     declares a packet larger than 64, the small version quietly never builds the receive pipe,
+//     yet claim() still returns true as long as the transmit pipe comes up. Again "connected but
+//     no data". The official examples always use BigBuffer precisely to avoid this.
 //
-//  四個物件約 12 KB RAM，對 Teensy 4.1 的 1 MB 來說不算什麼。
+//  Four objects cost about 12 KB of RAM, which is nothing against the Teensy 4.1's 1 MB.
 // ---------------------------------------------------------------------------
 static MIDIDevice_BigBuffer usbMidi0(usbHost);
 static MIDIDevice_BigBuffer usbMidi1(usbHost);
@@ -108,49 +108,49 @@ static MIDIDevice_BigBuffer *const kPorts[] = {
 static const int kNumPorts = (int)(sizeof(kPorts) / sizeof(kPorts[0]));
 
 // ---------------------------------------------------------------------------
-//  一般 USB 電腦鍵盤
+//  Ordinary USB computer keyboard
 //
-//  --- 為什麼跟 MIDI 放在同一個 .cpp，而不是自己一個檔 ------------------------
+//  --- Why this lives in the same .cpp as MIDI instead of its own file --------
 //
-//  USBHost_t36 的驅動物件是在「建構子」裡呼叫 driver_ready_for_device() 把
-//  自己掛進一條靜態串列的。跨translation unit 的靜態物件初始化順序在 C++
-//  是未定義的 —— 分兩個檔就等於賭運氣：有時候 KeyboardController 排在
-//  MIDIDevice 前面，有時候在後面，而排序會影響誰先被問到 claim()。
-//  更糟的是有機會在 usbHost 這個物件本身還沒建構好就去掛串列。
+//  USBHost_t36 driver objects hook themselves into a static list by calling
+//  driver_ready_for_device() from their *constructor*. Static initialization order across
+//  translation units is undefined in C++ -- splitting them into two files is a gamble: sometimes
+//  KeyboardController comes before MIDIDevice, sometimes after, and that order decides who gets
+//  asked to claim() first. Worse, the list can be touched before usbHost itself is constructed.
 //
-//  全部放同一個檔，順序就由書寫順序決定，是確定的。
-//  kbd_in.cpp 只留跟 USB 無關的邏輯（鍵碼對應、發聲、佇列），桌機測得到。
+//  Keep them all in one file and the order is the written order, which is deterministic.
+//  kbd_in.cpp keeps only the USB-independent logic (key mapping, note firing, queue), testable on a desktop.
 //
-//  --- 為什麼要 USBHIDParser ---------------------------------------------------
+//  --- Why USBHIDParser is needed ----------------------------------------------
 //
-//  KeyboardController 繼承的是 USBHIDInput，不是 USBDriver —— 它自己不認領
-//  介面，是由 USBHIDParser 認領 HID 介面、解析報告之後再轉給它。
-//  沒有 USBHIDParser 的話鍵盤會被列舉出來但完全沒有事件。
-//  放三個是因為有些鍵盤是複合裝置（鍵盤 + 多媒體鍵 + 滑鼠），一個介面一個。
+//  KeyboardController derives from USBHIDInput, not USBDriver -- it does not claim an interface
+//  itself; USBHIDParser claims the HID interface, parses the reports and passes them on.
+//  Without USBHIDParser the keyboard enumerates but produces no events at all.
+//  Three of them because some keyboards are composite (keyboard + media keys + mouse), one per interface.
 // ---------------------------------------------------------------------------
 static USBHIDParser        usbHid1(usbHost);
 static USBHIDParser        usbHid2(usbHost);
 static USBHIDParser        usbHid3(usbHost);
 static KeyboardController  usbKbd(usbHost);
 
-// 回呼是 C 函式指標，一樣要用檔案範圍的自由函式轉手。
+// The callbacks are C function pointers, so again a file-scope free function has to relay them.
 //
-// 用 attachRawPress 而不是 attachPress：raw 給的是 HID usage code，對應
-// 「鍵盤上的實體位置」；attachPress 給的是已經套過佈局的 unicode，換一把
-// AZERTY 鍵盤或使用者切到別的輸入法就全跑掉了。琴鍵要的是位置。
+// attachRawPress rather than attachPress: raw gives the HID usage code, which corresponds to the
+// "physical position on the keyboard"; attachPress gives unicode with the layout already applied,
+// which falls apart on an AZERTY keyboard or when the user switches input method. Keys want position.
 static void hKeyRawPress(uint8_t code)   { gKbd.feedFromUsb(code, true);  }
 static void hKeyRawRelease(uint8_t code) { gKbd.feedFromUsb(code, false); }
 
 // ---------------------------------------------------------------------------
-//  用 setHandle* 回呼，不要用 getType()。
+//  Use the setHandle* callbacks, not getType().
 //
-//  getType() 的回傳值在 USBHost_t36 的不同版本之間語意不一樣（早期是 1-based
-//  的索引，後來改成真正的 MIDI 狀態位元組），而且它旁邊那組 midi::NoteOn 常數
-//  其實屬於另一個函式庫（Arduino MIDI Library），USBHost_t36 單獨用時根本沒有
-//  那個命名空間 —— 直接寫 midi::NoteOn 會編不過。
-//  setHandle* 這組介面則是官方範例在用的，簽章跨版本穩定。
+//  getType()'s return value means different things across USBHost_t36 versions (early on a
+//  1-based index, later the real MIDI status byte), and the midi::NoteOn constants sitting next
+//  to it actually belong to a different library (the Arduino MIDI Library) -- that namespace
+//  does not exist when USBHost_t36 is used on its own, so writing midi::NoteOn simply won't
+//  compile. setHandle* is the interface the official examples use, and it is stable across versions.
 //
-//  回呼是 C 函式指標，所以要用檔案範圍的自由函式轉手給 gMidi。
+//  The callbacks are C function pointers, so file-scope free functions relay them to gMidi.
 // ---------------------------------------------------------------------------
 static void hNoteOn(uint8_t ch, uint8_t note, uint8_t vel) {
   (void)ch; gMidi.feed(0x90, note, vel);
@@ -162,8 +162,8 @@ static void hControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
   (void)ch; gMidi.feed(0xB0, cc, val);
 }
 static void hPitchChange(uint8_t ch, int pitch) {
-  // 回呼給的是「已經置中」的值（-8192 ~ 8191），這裡轉回 14 bit 原始格式，
-  // 好讓所有訊息都走同一個 feed() 入口 —— 那個入口在桌機上有測試涵蓋。
+  // The callback hands over an already-centred value (-8192 ~ 8191); convert it back to the raw
+  // 14 bit form so every message goes through the same feed() entry point -- the one with desktop test coverage.
   (void)ch;
   int v14 = pitch + 8192;
   if (v14 < 0) v14 = 0;
@@ -188,8 +188,8 @@ void MidiInput::begin(AudioSynthAdditive *s) {
 void MidiInput::service() {
   usbHost.Task();
 
-  // ---- 電腦鍵盤的連線狀態 ------------------------------------------------
-  // 跟 MIDI 共用同一個 USB Host 埠，所以順便在這裡追蹤。
+  // ---- Computer keyboard connection state --------------------------------
+  // Shares the one USB Host port with MIDI, so it is tracked here as well.
   const bool kb = (bool)usbKbd;
   if (kb != gKbd.connected()) {
     gKbd.setConnected(kb);
@@ -206,8 +206,8 @@ void MidiInput::service() {
     }
   }
 
-  // ---- 連線狀態 ----------------------------------------------------------
-  // 只要任何一個槽有裝置就算連上。名字取第一個報得出來的。
+  // ---- Connection state --------------------------------------------------
+  // Connected as soon as any slot has a device. The name is taken from the first one that reports one.
   bool any = false;
   _nPorts = 0;
   for (int i = 0; i < kNumPorts; i++) {
@@ -238,25 +238,25 @@ void MidiInput::service() {
   }
   if (!any) return;
 
-  // ---- 收訊息 ------------------------------------------------------------
-  // 四個槽都要讀。read() 回傳 true 代表「解出了一則訊息」，回呼在它裡面呼叫。
-  // 另外獨立記一個 _rawReads：如果它有在跳但 _msgs 是 0，代表收到的都是
-  // 我們沒有註冊回呼的類型（例如 Active Sensing、MIDI Clock），
-  // 那就表示鍵盤其實有在送東西，只是沒有音符 —— 兩種情況要分得出來。
+  // ---- Receive messages --------------------------------------------------
+  // All four slots have to be read. read() returning true means "a message was decoded"; the
+  // callbacks are invoked inside it. _rawReads is counted separately: if it climbs while _msgs
+  // stays 0, everything arriving is of a type we registered no callback for (Active Sensing, MIDI
+  // Clock), meaning the keyboard is sending something but no notes -- the two cases must be distinguishable.
   for (int i = 0; i < kNumPorts; i++)
     while (kPorts[i]->read()) _rawReads++;
 }
 
-#else   // ---------------------------------------------------------- 桌機 --
+#else   // ------------------------------------------------------- desktop --
 
-// 模擬器沒有 USB Host。留空實作，其他程式碼不用加任何條件編譯。
+// The simulator has no USB Host. Empty implementations, so no other code needs conditional compilation.
 void MidiInput::begin(AudioSynthAdditive *s) { _synth = s; }
 void MidiInput::service() {}
 
 #endif
 
 // ============================================================================
-//  以下與平台無關，模擬器也編得到，方便在桌機上測邏輯
+//  Everything below is platform-independent and compiles in the simulator too, handy for testing the logic on a desktop
 // ============================================================================
 void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
   _msgs++;
@@ -265,7 +265,7 @@ void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
 
   switch (status & 0xF0) {
     case 0x90:
-      // 力度 0 的 NoteOn 依 MIDI 規範等同 NoteOff，很多鍵盤都這樣送
+      // Per the MIDI spec a NoteOn with velocity 0 is a NoteOff, and plenty of keyboards send it that way
       if (d2 == 0) onNoteOff(d1); else onNoteOn(d1, d2);
       break;
     case 0x80:
@@ -276,7 +276,7 @@ void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
       onControl(d1, d2);
       break;
     case 0xE0: {
-      const int bend = ((int)d2 << 7) | d1;          // 14 bit，中央值 8192
+      const int bend = ((int)d2 << 7) | d1;          // 14 bit, centre value 8192
       if (_synth)
         _synth->setPitchBend((bend - 8192) / 8192.0f * TC_MIDI_BEND_RANGE);
       break;
@@ -289,15 +289,16 @@ void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
 void MidiInput::onNoteOn(uint8_t note, uint8_t vel) {
   if (!_synth) return;
 
-  // 力度對應：MIDI 1~127 -> 0.08~1.0。
+  // Velocity mapping: MIDI 1~127 -> 0.08~1.0.
   //
-  // 用平方而不是線性：MIDI 力度感覺上接近「音量」，而音量與振幅是平方關係，
-  // 線性對應會讓弱奏聽起來還是很大聲。下限留 0.08 是因為合成器的包絡是照
-  // profile 量到的曲線在播，太小的值會被後面的門檻吃掉、變成沒聲音。
+  // Squared rather than linear: MIDI velocity feels close to "volume", and volume relates to
+  // amplitude as a square, so a linear mapping leaves soft playing sounding loud anyway. The 0.08
+  // floor is there because the synth plays the envelope curve measured in the profile, and smaller
+  // values get eaten by the thresholds downstream and come out silent.
   //
-  // 老實說：素材只有單一力度（例如 Piano.mf），所以這裡改變的只有音量，
-  // 真實鋼琴「彈越大聲、泛音越多」那部分模擬不出來。要做到得對同一個音
-  // 錄 pp/mf/ff 三種力度分別建 profile。
+  // Honestly: the material only has one velocity (Piano.mf, say), so all this changes is volume;
+  // the "louder you play, the more overtones" part of a real piano cannot be reproduced. Doing that
+  // would mean recording pp/mf/ff of the same note and building a profile for each.
   float v = (float)vel / 127.0f;
   v = 0.08f + 0.92f * v * v;
 
@@ -312,8 +313,8 @@ void MidiInput::onNoteOn(uint8_t note, uint8_t vel) {
     case AudioSynthAdditive::NOTE_NO_TIMBRE:
     case AudioSynthAdditive::NOTE_NO_MODEL:
       _noTimbre++;
-      // 這是「按了沒聲音」最常見的原因，而且以前完全沒有任何提示。
-      // 只印一次，不然彈幾下就洗版了。
+      // This is the most common reason for "pressed a key, got no sound", and there used to be
+      // no hint of it whatsoever. Printed once only, or a few keypresses would flood the log.
       if (!_warned) {
         _warned = true;
         Serial.println(F("[MIDI] 收到音符，但目前沒有載入任何音色，所以不會發聲。"));
@@ -328,7 +329,7 @@ void MidiInput::onNoteOn(uint8_t note, uint8_t vel) {
       break;
   }
 
-  // 這個音又被按下了，就把它從「等著被延音踏板放掉」的名單移除
+  // This note has been pressed again, so drop it from the "waiting to be released by the sustain pedal" list
   for (int i = 0; i < _nDeferred; i++) {
     if (_held[i] == note) {
       _held[i] = _held[--_nDeferred];
@@ -342,7 +343,7 @@ void MidiInput::onNoteOff(uint8_t note) {
   if (_nHeld > 0) _nHeld--;
 
   if (_sustain) {
-    // 踏板踩著：先記下來，放開踏板時才一起送 noteOff
+    // Pedal held down: just record it; the noteOff goes out when the pedal is released
     for (int i = 0; i < _nDeferred; i++) if (_held[i] == note) return;
     if (_nDeferred < (int)sizeof(_held)) _held[_nDeferred++] = note;
     return;
@@ -354,7 +355,7 @@ void MidiInput::onControl(uint8_t cc, uint8_t val) {
   if (!_synth) return;
   switch (cc) {
     case TC_MIDI_CC_SUSTAIN:
-      // 標準：>= 64 算踩下
+      // Standard: >= 64 counts as pressed
       if (val >= 64) {
         _sustain = true;
       } else {
@@ -369,7 +370,7 @@ void MidiInput::onControl(uint8_t cc, uint8_t val) {
       break;
 
     case TC_MIDI_CC_VOLUME:
-      // 旋鈕轉到底不要真的變成 0，不然會以為當機了
+      // Don't let a knob turned all the way down actually reach 0, or it looks like a crash
       _synth->setMasterGain(0.02f + 0.60f * (val / 127.0f));
       break;
 
@@ -394,7 +395,7 @@ void MidiInput::panic() {
 }
 
 // ---------------------------------------------------------------------------
-//  診斷：把整條鏈路每一段的計數印出來，並依照斷在哪裡給對應的建議。
+//  Diagnostics: print the counter for each stage of the chain, with advice matched to where it broke.
 // ---------------------------------------------------------------------------
 void MidiInput::report() const {
   Serial.println();
@@ -423,16 +424,17 @@ void MidiInput::report() const {
 
   Serial.println(F("-- 判讀 --"));
 
-  // 這一段放在最前面：只要電腦鍵盤有反應，USB Host 埠的硬體就是好的，
-  // 底下那些「檢查 D+/D- 有沒有接反」的建議就完全不必看了。
-  // 兩種裝置走的端點類型不一樣（HID 是 interrupt、USB MIDI 是 bulk），
-  // 所以「鍵盤能用、MIDI 不能用」也是有意義的結果，代表問題在協定那一層。
+  // This part comes first: if the computer keyboard responds at all, the USB Host port hardware is
+  // fine and none of the "check whether D+/D- are swapped" advice below needs reading.
+  // The two device types use different endpoint types (HID is interrupt, USB MIDI is bulk), so
+  // "keyboard works, MIDI doesn't" is a meaningful result too -- it puts the problem at the protocol layer.
   if (gKbd.pressCount() > 0) {
     Serial.println(F("  電腦鍵盤有收到按鍵 -> USB Host 埠的接線與供電確定正常。"));
     if (!_connected)
       Serial.println(F("  所以 MIDI 鍵盤那邊的問題在裝置本身或它的 USB 協定，不是你的焊接。"));
   }
-  // 順序很重要：只要有訊息進來，裝置就一定是通的，這時不該再叫人去查接線。
+  // Order matters: once messages are coming in the device is definitely fine, and at that point
+  // nobody should be told to go and check their wiring.
   if (!_connected && _msgs == 0) {
     Serial.println(F("  裝置沒被列舉出來。依序檢查："));
     Serial.println(F("   1. 鍵盤本身的燈有沒有亮？沒亮代表 USB Host 埠的 5V 沒接到"));

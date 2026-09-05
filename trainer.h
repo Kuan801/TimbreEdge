@@ -1,19 +1,20 @@
 // ============================================================================
-//  trainer.h  -  在 Teensy 上直接訓練那顆 MLP
+//  trainer.h  -  train that MLP directly on the Teensy
 //
-//  跟 tools/train_ddsp.py 是同一套數學，只是改用 C++ 手刻：
-//    損失 = 交叉熵(32 個諧波的 softmax) + 0.3 * BCE(噪聲的 sigmoid)
-//    最佳化 = Adam
+//  Same maths as tools/train_ddsp.py, just hand-written in C++:
+//    loss = cross-entropy(softmax over the 32 harmonics) + 0.3 * BCE(noise sigmoid)
+//    optimiser = Adam
 //
-//  為什麼可以在 MCU 上訓練：
-//    每筆樣本前向 2208 + 反向 4288 ≈ 6.5k MAC。batch 128 × 6000 epoch
-//    = 768k 次樣本傳遞 ≈ 5.0 G MAC。Cortex-M7 @600MHz 帶單週期 FMA，
-//    實測落在 20~40 秒。
-//    記憶體：訓練資料 215 KB + Adam/梯度 28 KB + 權重 9 KB ≈ 252 KB，
-//    Teensy 4.1 的 OCRAM 有 512 KB，塞得下。
+//  Why training on the MCU is possible:
+//    Per sample, 2208 forward + 4288 backward ≈ 6.5k MAC. batch 128 × 6000 epoch
+//    = 768k sample passes ≈ 5.0 G MAC. A Cortex-M7 @600MHz with single-cycle FMA
+//    measures out at 20~40 seconds.
+//    Memory: training data 215 KB + Adam/gradients 28 KB + weights 9 KB ≈ 252 KB;
+//    the Teensy 4.1 has 512 KB of OCRAM, so it fits.
 //
-//  訓練期間 audio ISR 照常運作（它是中斷，優先權比 loop() 高），不會爆音，
-//  只是那幾十秒不能演奏。
+//  The audio ISR keeps running throughout training (it is an interrupt, higher
+//  priority than loop()), so there are no dropouts -- you just cannot play during
+//  those few tens of seconds.
 // ============================================================================
 #pragma once
 
@@ -21,13 +22,15 @@
 #include "config.h"
 #include "timbre_model.h"
 
-// 一筆訓練樣本 = 84 bytes。
+// One training sample = 84 bytes.
 //
-// 諧波目標用「平方根壓伸 + int16」而不是 float32：
-//   32 個 float 要 128 bytes，訓練集會膨脹到 379 KB 塞不下；
-//   而平方根壓伸後，小振幅（高次諧波常低到 0.001）的相對解析度是 0.1%，
-//   反而比 float32 直接截成 int16 好一個數量級。
-//   量化雜訊遠低於實測的 0.0002 收斂誤差，不影響訓練品質。
+// The harmonic targets use "square-root companding + int16" rather than float32:
+//   32 floats would be 128 bytes, bloating the training set to 379 KB, which does
+//   not fit; and after square-root companding the relative resolution at small
+//   amplitudes (high harmonics are often down at 0.001) is 0.1%, an order of
+//   magnitude better than truncating float32 straight to int16.
+//   The quantisation noise is far below the measured 0.0002 convergence error, so
+//   it does not hurt training quality.
 #define TC_Q_SCALE 32767.0f
 static inline int16_t tc_quant(float v) {
   if (v <= 0.0f) return 0;
@@ -41,28 +44,29 @@ static inline float tc_dequant(int16_t q) {
 
 struct TrainSample {
   float   in[TC_MLP_IN];        // 16 bytes
-  int16_t harm[TC_N_HARM];      // 64 bytes，已正規化（還原後總和 ≈ 1）
+  int16_t harm[TC_N_HARM];      // 64 bytes, normalised (sums to ≈ 1 once decoded)
   int16_t noise;                //  2 bytes
-  int16_t _pad;                 //  2 bytes（保持 4-byte 對齊）
+  int16_t _pad;                 //  2 bytes (keeps the 4-byte alignment)
 };
 
 class TrainSet {
 public:
   void clear();
-  bool add(const float *in, const float *harm, float noise);   // 滿了回 false
+  bool add(const float *in, const float *harm, float noise);   // Returns false when full
 
   int  size()  const { return _n; }
 
-  // 退回到某個大小。連續採樣要用：分析跟「加進訓練集」是同一趟做的，
-  // 等到判定出爐才知道這個音不能用 —— 那時候樣本已經進去了，得能收回來。
-  // 只往回不往前，所以不會憑空造出資料。
+  // Roll back to a given size. Needed for continuous sampling: the analysis and
+  // the "add to the training set" are the same pass, and the verdict only lands
+  // after the sample is already in -- so it has to be retractable.
+  // Backwards only, never forwards, so it cannot conjure up data.
   void truncate(int n) { if (n >= 0 && n < _n) _n = n; }
   bool full()  const { return _n >= TC_TRAIN_MAX; }
   const TrainSample *data() const;
 
-  // 印出目前累積了什麼（幾筆、涵蓋哪些音高）
+  // Print what has been collected so far (how many samples, which pitches covered)
   void summary() const;
-  // 涵蓋幾個不同音高（用輸入特徵 in[0] 分群）
+  // How many distinct pitches are covered (grouped by the input feature in[0])
   int  pitchCount() const;
 
 private:
@@ -70,12 +74,12 @@ private:
   bool _warned = false;
 };
 
-// 訓練是阻塞式的（幾十秒），設進度回呼讓 OLED 能即時顯示收斂狀況。
-// 傳 nullptr 取消。
+// Training blocks (tens of seconds), so set a progress callback to let the OLED
+// show convergence live. Pass nullptr to cancel.
 void trainerSetProgressCallback(void (*cb)(int epoch, int total, float ce, float mae));
 
-// 訓練。回傳 false 表示資料不足或發散。
-//   progressEvery: 每幾個 epoch 回報一次進度 (0 = 不回報)
+// Train. Returns false if there is not enough data or it diverges.
+//   progressEvery: report progress every N epochs (0 = no reporting)
 bool trainMlp(const TrainSet &ts, MlpWeights &out,
               int epochs = TC_TRAIN_EPOCHS,
               float lr = TC_TRAIN_LR,

@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 # =============================================================================
-#  report_docx.py  -  把 evaluate.py 的 JSON 變成一份 Word 報告
+#  report_docx.py  -  turn evaluate.py's JSON into a Word report
 #
-#  用法
+#  Usage
 #  -----
-#    python3 evaluate.py PLAY.WAV 素材資料夾/ --start 60 --count 24 \
+#    python3 evaluate.py PLAY.WAV material_dir/ --start 60 --count 24 \
 #            --json report.json --plot report.png
-#    python3 report_docx.py report.json --plot report.png --out 音色比對報告.docx \
-#            --source "Iowa MIS 鋼琴 mf，C4~B4 共 12 音" \
-#            --method "Teensy 4.1 實機，按 w 錄成 PLAY.WAV"
+#    python3 report_docx.py report.json --plot report.png --out timbre_report.docx \
+#            --source "Iowa MIS piano mf, 12 notes C4~B4" \
+#            --method "Teensy 4.1 hardware, pressed w to record PLAY.WAV"
 #
-#  --- 兩個設計決定 ---------------------------------------------------------
+#  --- Two design decisions -------------------------------------------------
 #
-#  1) 吃 JSON，不去解析 evaluate.py 印出來的表格。
-#     那張表是給人看的，欄寬和文字隨時會為了好讀而調整。拿它當資料介面，
-#     改一次對齊就會靜靜地壞掉 —— 而且壞掉的樣子是「數字錯位」，不是報錯。
+#  1) It eats the JSON; it does not parse the table evaluate.py prints.
+#     That table is for humans, and its column widths and wording get adjusted
+#     for readability at any time. Use it as a data interface and one alignment
+#     tweak breaks it silently — and the breakage looks like "numbers in the
+#     wrong column", not like an error.
 #
-#  2) 判讀標準從 evaluate.py import，不在這裡重抄一份。
-#     抄兩份的下場是改了門檻只改一邊，報告上的顏色與結論仍然照舊，
-#     那種錯不會有任何跡象。
+#  2) The interpretation criteria are imported from evaluate.py, not copied out
+#     again here. Two copies means a threshold gets changed on one side only,
+#     while the report's colours and conclusions stay exactly as they were —
+#     the sort of error that leaves no trace at all.
 #
-#  報告只放「量到的數字」與「判讀標準」，不代替使用者下結論 ——
-#  結論該由看報告的人依標準自己判斷，那也是指導教授會問的第一件事。
+#  The report carries only the measured numbers and the interpretation criteria;
+#  it does not draw the conclusion for the user — that is for whoever reads it to
+#  judge against the criteria, which is also the first thing the supervising
+#  professor will ask about.
 # =============================================================================
 
 import argparse
@@ -40,19 +45,19 @@ from docx.shared import Pt, RGBColor, Cm
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from evaluate import CRITERIA, METRIC_KEYS, grade   # noqa: E402
 
-# 淺色底。Word 的網底色碼是 RRGGBB 純數字，沒有 # 前綴。
+# Light background. Word's shading colour is plain RRGGBB digits, no # prefix.
 FILL = {"good": "E8F5E9", "ok": "FFF8E1", "bad": "FFEBEE", "na": "F5F5F5"}
 MEAN_FILL = "CFD8DC"
 HDR_FILL = "ECEFF1"
 
-CJK_FONT = "Microsoft JhengHei"   # 微軟正黑體；沒有的話 Word 會自己找替代
+CJK_FONT = "Microsoft JhengHei"   # Microsoft JhengHei; if it is missing, Word finds a substitute itself
 
 
 def set_cell_bg(cell, hexcolor):
-    """python-docx 沒有網底 API，只能自己塞 w:shd。"""
+    """python-docx has no shading API, so we have to insert w:shd ourselves."""
     tcPr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear")          # 一定要 clear；solid 會整格變黑
+    shd.set(qn("w:val"), "clear")          # must be clear; solid turns the whole cell black
     shd.set(qn("w:color"), "auto")
     shd.set(qn("w:fill"), hexcolor)
     tcPr.append(shd)
@@ -66,7 +71,7 @@ def set_run_font(run, size=None, bold=None, color=None):
     if color is not None:
         run.font.color.rgb = RGBColor.from_string(color)
     run.font.name = CJK_FONT
-    # 中文字要另外指定 eastAsia，不然 Word 會用預設字型排中文
+    # Chinese needs eastAsia set separately, or Word lays it out in the default font
     run._element.rPr.rFonts.set(qn("w:eastAsia"), CJK_FONT)
 
 
@@ -101,7 +106,7 @@ def fmt(key, v):
 
 
 def short_name(key):
-    """表頭要短，不然 9 欄塞不進 A4。"""
+    """Headers have to be short, or 9 columns will not fit on A4."""
     n = CRITERIA[key][0]
     return n.replace(" r", "").replace("誤差", "").replace("相關性", "")
 
@@ -110,7 +115,7 @@ def short_name(key):
 def build(data, args):
     doc = Document()
 
-    # A4 直式，邊界縮一點才塞得下 10 欄的表
+    # A4 portrait; tighten the margins a little so a 10-column table fits
     sec = doc.sections[0]
     sec.left_margin = sec.right_margin = Cm(1.8)
     sec.top_margin = sec.bottom_margin = Cm(2.0)
@@ -122,7 +127,7 @@ def build(data, args):
 
     notes = data["notes"]
 
-    # ---------------------------------------------------------------- 標題 --
+    # --------------------------------------------------------------- Title --
     h = doc.add_heading(args.title, level=0)
     for r in h.runs:
         r.font.name = CJK_FONT
@@ -130,7 +135,7 @@ def build(data, args):
     para(doc, "產生時間：" + datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
          size=9, italic=True, after=12)
 
-    # ------------------------------------------------------------ 量測條件 --
+    # ---------------------------------------------- Measurement conditions --
     doc.add_heading("一、量測條件", level=1)
     para(doc, f"原始素材：{args.source}")
     para(doc, f"合成方式：{args.method}")
@@ -142,7 +147,7 @@ def build(data, args):
               "所有跟時間有關的指標都先對齊起音點 —— 不對齊的話，切點的誤差會污染每一項數字。",
          after=12)
 
-    # ------------------------------------------------------------ 逐音對照 --
+    # ------------------------------------------------- Per-note comparison --
     doc.add_heading("二、逐音對照", level=1)
     para(doc, "綠底＝很好，黃底＝可接受，紅底＝超出範圍。判讀標準見第三節。",
          size=9, after=6)
@@ -175,7 +180,7 @@ def build(data, args):
     para(doc, f"共 {len(notes)} 個音：{n_all_good} 個全部指標都落在「很好」，"
               f"{n_any_bad} 個至少有一項超出可接受範圍。", after=12)
 
-    # -------------------------------------------------------- 判讀標準 -----
+    # ----------------------------------------- Interpretation criteria -----
     doc.add_heading("三、指標與判讀標準", level=1)
     para(doc, "這些門檻不是這份報告訂的，是 evaluate.py 既有的標準，"
               "所有評測共用同一套，數字才能跨次比較。", size=9, after=6)
@@ -199,7 +204,7 @@ def build(data, args):
               "LSD、頻譜圖、質心都看不到它，但耳朵聽得出來"
               "（少了呼吸感、弓噪、槌擊聲）。", size=9, after=12)
 
-    # ---------------------------------------------------------------- 圖 ---
+    # -------------------------------------------------------------- Plot ---
     sec_no = 4
     if args.plot and os.path.exists(args.plot):
         doc.add_heading(f"四、比較圖", level=1)
@@ -207,7 +212,7 @@ def build(data, args):
         doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
         sec_no = 5
 
-    # ------------------------------------------------------------ 逐音明細 --
+    # ----------------------------------------------------- Per-note detail --
     cn = {4: "四", 5: "五"}[sec_no]
     doc.add_heading(f"{cn}、逐音明細", level=1)
     for n in notes:

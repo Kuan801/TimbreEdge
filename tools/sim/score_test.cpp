@@ -1,11 +1,12 @@
 // ============================================================================
-//  score_test.cpp  -  在桌機上驗證兩份樂譜（半音階與卡農）
+//  score_test.cpp  -  verify the two scores (chromatic scale and canon) on the desktop
 //
-//  用法：  make score_test && ./score_test
+//  Usage:  make score_test && ./score_test
 //
-//  樂譜是純資料產生器，不用 Arduino 也不用音訊。手寫 100 多個音符很容易
-//  出現「重疊到超過聲部數」「某個 tick 空掉」「音高跑出音色庫太遠」這種錯，
-//  燒進去用耳朵聽反而不容易定位。
+//  A score is a pure data generator: no Arduino needed, no audio either. Writing
+//  100-odd notes by hand easily produces "more overlap than there are voices",
+//  "a tick left empty" or "a pitch too far outside the timbre bank", and flashing
+//  it and listening makes those harder to locate, not easier.
 // ============================================================================
 #include "../../score.h"
 #include <cstdio>
@@ -20,7 +21,7 @@ static void check(const char *what, bool ok, const char *detail = "") {
 
 static ScoreNote gN[TC_MAX_NOTES];
 
-// 某個 tick 同時有幾個音在響
+// How many notes are sounding at a given tick
 static int polyAt(const ScoreNote *n, int cnt, int tick) {
   int p = 0;
   for (int i = 0; i < cnt; i++)
@@ -38,36 +39,38 @@ static void report() {
   check("有產生音符", cnt > 0, msg);
   check("沒有塞爆 TC_MAX_NOTES", cnt < TC_MAX_NOTES);
 
-  // 音域
+  // Pitch range
   int lo = 127, hi = 0;
   for (int i = 0; i < cnt; i++) { lo = std::min(lo, (int)gN[i].midi); hi = std::max(hi, (int)gN[i].midi); }
   snprintf(msg, sizeof(msg), "(%d ~ %d)", lo, hi);
   check("音高都在 MIDI 合法範圍", lo >= 0 && hi <= 127, msg);
 
-  // 音色庫只有 C4~B4 (60~71)，離太遠移調品質會掉
+  // The timbre bank only has C4~B4 (60~71); transpose too far and quality drops
   const int down = 60 - lo, up = hi - 71;
   snprintf(msg, sizeof(msg), "(往下 %d、往上 %d 個半音)", down > 0 ? down : 0, up > 0 ? up : 0);
   check("移調距離不超過 12 個半音", (down <= 12) && (up <= 12), msg);
 
-  // 每個音都要落在總長度內
+  // Every note has to fall within the total length
   bool inRange = true;
   for (int i = 0; i < cnt; i++) if (gN[i].tick + gN[i].dur > total) inRange = false;
   check("每個音都在總長度內", inRange);
 
-  // Player 是一路往前掃的，音符必須依 tick 遞增排好 —— 沒排序的話游標
-  // 越過某個音之後就再也回不去，後面整段靜音。這是實際踩過的坑：
-  // 第一版產生器照聲部書寫，結果只有 A 段的低音在響。
+  // Player only ever scans forward, so notes must be sorted by increasing tick ——
+  // once the cursor is past a note there is no going back and the rest of the piece
+  // is silent. This is a hole we actually fell into: the first generator wrote voice
+  // by voice, and only the bass of section A sounded.
   bool sorted = true;
   for (int i = 1; i < cnt; i++) if (gN[i].tick < gN[i - 1].tick) sorted = false;
   check("音符依 tick 遞增排序", sorted);
 
-  // 音長不能是 0
+  // Duration must not be 0
   bool durOk = true;
   for (int i = 0; i < cnt; i++) if (gN[i].dur == 0) durOk = false;
   check("沒有長度為 0 的音", durOk);
 
-  // 時間軸不能有空洞（否則會聽到莫名的靜音）。
-  // 只檢查到「最後一個音結束」為止 —— 之後那段是刻意留給 release 的尾巴。
+  // No holes in the timeline (or you hear silence out of nowhere).
+  // Only checked as far as "the end of the last note" —— the stretch after that is
+  // deliberately left as tail for the release.
   int lastEnd = 0;
   for (int i = 0; i < cnt; i++) lastEnd = std::max(lastEnd, (int)(gN[i].tick + gN[i].dur));
   int gaps = 0, maxPoly = 0;
@@ -82,7 +85,7 @@ static void report() {
   snprintf(msg, sizeof(msg), "(最多同時 %d 個，上限 %d)", maxPoly, TC_N_VOICES);
   check("同時發聲數不超過 TC_N_VOICES", maxPoly <= TC_N_VOICES, msg);
 
-  // 聲部分佈
+  // Voice distribution
   int part[4] = {0, 0, 0, 0};
   for (int i = 0; i < cnt; i++) if (gN[i].part < 4) part[gN[i].part]++;
   printf("     聲部分佈：旋律 %d  內聲部 %d  低音 %d\n", part[0], part[1], part[2]);
@@ -94,7 +97,7 @@ int main() {
   printf("\n樂譜驗證（音色庫涵蓋 C4~B4 = MIDI 60~71）\n");
   report();
 
-  // 半音階是拿來逐音比對的，絕對不能有重疊
+  // The chromatic scale exists for note-by-note comparison, so absolutely no overlap
   const int cnt = buildScore(gN, TC_MAX_NOTES);
   int maxPoly = 0, lastEnd = 0;
   for (int i = 0; i < cnt; i++) lastEnd = std::max(lastEnd, (int)(gN[i].tick + gN[i].dur));
@@ -107,50 +110,54 @@ int main() {
   check("預設最後一個音是 B4(71)", cnt > 0 && gN[cnt - 1].midi == 71);
 
   // -------------------------------------------------------------------------
-  //  動態音域：實務上是「音色庫的音域，再往上一個八度」
+  //  Dynamic pitch range: in practice "the timbre bank's range, plus an octave up"
   // -------------------------------------------------------------------------
   printf("\n=== 動態音域 ===\n");
   {
-    scoreSetScaleRange(60, 71 + 12);            // 採到 C4~B4 -> 演奏 C4~B5
+    scoreSetScaleRange(60, 71 + 12);            // Sampled C4~B4 -> play C4~B5
     const int n2 = buildScore(gN, TC_MAX_NOTES);
     check("C4~B5 共 24 音", n2 == 24);
     check("從 C4(60) 開始", n2 > 0 && gN[0].midi == 60);
     check("到 B5(83) 結束", n2 > 0 && gN[n2 - 1].midi == 83);
 
-    // 音符必須連續遞增、不重疊，否則 evaluate.py 對不上
+    // Notes must run consecutively upward with no overlap, or evaluate.py can't line them up
     bool mono = true;
     for (int i = 1; i < n2; i++)
       if (gN[i].midi != gN[i - 1].midi + 1 || gN[i].tick <= gN[i - 1].tick) mono = false;
     check("半音連續遞增且時間不重疊", mono);
 
-    // 總長度要跟著音數走，否則 Player 會提早停或空轉
+    // Total length has to follow the note count, or Player stops early or spins idle
     const uint16_t tot = scoreTotalTicks();
     check("總長度涵蓋最後一個音", tot >= gN[n2 - 1].tick + gN[n2 - 1].dur);
 
-    // 名稱是給面板看的，音域變了名稱也要變 —— 顯示跟實際不符最難查
+    // The name is what the panel shows: if the range changes the name must change too
+    // —— a display that disagrees with reality is the hardest thing to track down
     check("名稱跟著音域走", strcmp(scoreName(), "C4-B5 scale") == 0);
 
-    // 邊界：顛倒的範圍要能自己修正，不能產生負數音數或寫爆陣列
+    // Edge case: a reversed range must correct itself, not yield a negative note count or overrun the array
     scoreSetScaleRange(80, 60);
     const int n3 = buildScore(gN, TC_MAX_NOTES);
     check("上下顛倒會自動對調", n3 == 21 && gN[0].midi == 60);
 
-    // 音色庫理論上可以涵蓋很寬的音域，加一個八度後不能超過陣列
+    // The timbre bank could in principle span a very wide range; adding an octave must not overflow the array
     scoreSetScaleRange(0, 127);
     const int n4 = buildScore(gN, TC_MAX_NOTES);
     check("極端音域不會寫爆 TC_MAX_NOTES", n4 > 0 && n4 <= TC_MAX_NOTES);
 
-    scoreSetScaleRange(48, 71);                 // 還原，不影響後面
+    scoreSetScaleRange(48, 71);                 // Restore, so nothing later is affected
   }
 
   // -------------------------------------------------------------------------
-  //  卡農
+  //  Canon
   //
-  //  半音階驗的是「切得開」，卡農要驗的是完全不同的三件事：
-  //    1) 三聲部疊起來不會爆掉聲部數（TC_N_VOICES）
-  //    2) 八度安置之後每個音都還在「音色庫涵蓋範圍 + 一個八度」裡面
-  //       —— 這正是接回這份譜時唯一新寫的邏輯，也是最容易錯的地方
-  //    3) 低音沒有翻到旋律上面去
+  //  The chromatic scale tests "it comes apart cleanly"; the canon has to test
+  //  three entirely different things:
+  //    1) three voices stacked up don't blow past the voice count (TC_N_VOICES)
+  //    2) after octave placement every note is still inside "the range the timbre
+  //       bank covers + one octave"
+  //       —— this is the only logic newly written when this score was wired back
+  //       in, and the easiest place to get it wrong
+  //    3) the bass hasn't flipped above the melody
   // -------------------------------------------------------------------------
   auto canonCheck = [&](const char *what, int bankLo, int bankHi) {
     scoreSetScaleRange(bankLo, bankHi + 12);
@@ -160,14 +167,16 @@ int main() {
     char msg[96];
 
     printf("\n--- %s（音色庫 %d~%d，可用窗 %d~%d）---\n", what, bankLo, bankHi, winLo, winHi);
-    // 原譜 112 個音符；同音合併之後會少一些（低音被安置到內聲部的音域時
-    // 會有一部分重疊在一起），少太多就代表移調把整條線疊掉了
+    // 112 notes in the original score; merging unisons loses a few (when the bass is
+    // placed into an inner voice's range part of it ends up overlapping), and losing
+    // too many means transposition has collapsed a whole line
     snprintf(msg, sizeof(msg), "(%d 個音符，原譜 112，合併掉 %d)", n, 112 - n);
     check("卡農有產生音符（合併後仍在合理範圍）", n >= 80 && n <= 112, msg);
 
-    // Player 的 note-off 是用音高當鍵的：兩個同音高的音疊在一起時，
-    // 先結束的會把還在響的一起關掉。這條規則壞掉的症狀是某幾個小節
-    // 低音突然斷半拍 —— 只能用這個測試抓，耳朵找不到。
+    // Player keys note-off by pitch: when two notes of the same pitch overlap, the one
+    // that ends first shuts off the one still sounding. The symptom of this rule
+    // breaking is the bass cutting out for half a beat in a few bars —— only this test
+    // catches it, the ear can't find it.
     int unison = 0;
     for (int i = 0; i < n; i++)
       for (int j = i + 1; j < n; j++) {
@@ -179,8 +188,9 @@ int main() {
     snprintf(msg, sizeof(msg), "(%d 對)", unison);
     check("沒有兩個音同時同音高", unison == 0, msg);
 
-    // 音都要落在可用窗內。掉出去代表八度安置算錯了 ——
-    // 聽起來就是「某一條線悶掉或尖掉」，用耳朵很難指認是哪裡出錯。
+    // Every note must land inside the usable window. Falling outside means the octave
+    // placement was computed wrong —— it sounds like "one of the lines gone dull or
+    // gone shrill", and the ear has a hard time saying where it went wrong.
     int lo = 127, hi = 0, outside = 0;
     for (int i = 0; i < n; i++) {
       lo = std::min(lo, (int)gN[i].midi);
@@ -190,21 +200,21 @@ int main() {
     snprintf(msg, sizeof(msg), "(實際 %d~%d，出界 %d 個)", lo, hi, outside);
     check("每個音都在可用窗內", outside == 0, msg);
 
-    // 只移八度 -> 調性不變。D 大調的音級：C# D E F# G A B
+    // Octave shifts only -> the key is unchanged. Scale degrees of D major: C# D E F# G A B
     const bool kInKey[12] = { false, true, true, false, true, false,
                               true, true, false, true, false, true };
     bool keyOk = true;
     for (int i = 0; i < n; i++) if (!kInKey[gN[i].midi % 12]) keyOk = false;
     check("移調只動八度，仍然是 D 大調", keyOk);
 
-    // 位移量一定是 12 的倍數，否則就是有人把「移調」寫成了「改旋律」
+    // The shift is always a multiple of 12, otherwise someone wrote "transpose" as "rewrite the melody"
     bool oct = true;
     for (int p2 = 0; p2 < 3; p2++) if (scoreCanonShift(p2) % 12 != 0) oct = false;
     snprintf(msg, sizeof(msg), "(旋律 %+d 內聲部 %+d 低音 %+d)",
              scoreCanonShift(0), scoreCanonShift(1), scoreCanonShift(2));
     check("位移量都是整個八度", oct, msg);
 
-    // 聲部順序：用平均音高判斷（三條線本來就交疊，比最高/最低音穩定）
+    // Voice order: judged by mean pitch (the lines overlap by nature, so it is steadier than highest/lowest note)
     double sum[3] = {0, 0, 0};
     int    cn[3]  = {0, 0, 0};
     for (int i = 0; i < n; i++) if (gN[i].part < 3) { sum[gN[i].part] += gN[i].midi; cn[gN[i].part]++; }
@@ -213,7 +223,7 @@ int main() {
     snprintf(msg, sizeof(msg), "(低音 %.1f <= 內聲部 %.1f <= 旋律 %.1f)", mBass, mIn, mMel);
     check("低音沒有翻到旋律上面", mBass <= mIn && mIn <= mMel, msg);
 
-    // 同時發聲數：三聲部 + release 尾音，絕對不能超過合成器的聲部數
+    // Simultaneous voices: three parts + release tails, never over the synth's voice count
     int lastEnd = 0, maxPoly = 0, gaps = 0;
     for (int i = 0; i < n; i++) lastEnd = std::max(lastEnd, (int)(gN[i].tick + gN[i].dur));
     for (int t = 0; t < lastEnd; t++) {
@@ -241,14 +251,15 @@ int main() {
   };
 
   printf("\n=== 卡農 ===\n");
-  // 現況最常見的情形：Iowa MIS 素材 C4~B4
+  // The most common case today: Iowa MIS samples, C4~B4
   canonCheck("音色庫在中央", 60, 71);
-  // 小號那批：E3~B5，窗很寬，三條線應該都不用搬
+  // The trumpet set: E3~B5, a wide window, none of the three lines should need moving
   canonCheck("音色庫很寬", 52, 83);
-  // 極端：音色庫整個在低音域。這一組會逼出「聲部翻過去」的保護 ——
-  // 內聲部與旋律被往下推，而低音本來就在下面不用動
+  // Extreme: the whole timbre bank sits in the low register. This one forces out the
+  // "voice flipped over" guard —— the inner voice and the melody get pushed down,
+  // while the bass is already down there and doesn't move
   canonCheck("音色庫很低", 36, 47);
-  // 極端：音色庫整個在高音域
+  // Extreme: the whole timbre bank sits in the high register
   canonCheck("音色庫很高", 84, 95);
 
   printf("\n=== 模式切換 ===\n");

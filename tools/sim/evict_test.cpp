@@ -1,14 +1,15 @@
 // ============================================================================
-//  evict_test  -  音色庫滿了之後該犧牲誰
+//  evict_test  -  who gets sacrificed once the timbre bank is full
 //
-//  這段邏輯是無聲失效的那一類：換錯人不會當機、不會報錯，只會讓某個音區
-//  沒有素材可用，然後所有落在那一區的音都靠遠距離移調硬撐。
-//  實測小號那批就是這樣 —— E3~G3 整段被丟光，諧波 LSD 12~14 dB。
+//  This one fails silently: evicting the wrong entry won't crash and won't report an error,
+//  it just leaves a pitch region with no material, so every note landing there limps along
+//  on a long transposition. The trumpet set did exactly that -- all of E3~G3 was thrown out,
+//  harmonic LSD 12~14 dB.
 //
-//  所以測試分三種：
-//    1) 真實情境（32 個小號素材）最後留下來的分佈夠不夠平均
-//    2) 每一條規則的正例與負例
-//    3) 負對照：舊版邏輯（滿了就拒收）在同一份輸入下必須明顯更差
+//  So the test has three parts:
+//    1) whether the distribution left over from a realistic run (32 trumpet samples) is even enough
+//    2) a positive and a negative case for every rule
+//    3) negative control: the old logic (refuse once full) must be clearly worse on the same input
 // ============================================================================
 #include <cmath>
 #include <cstdio>
@@ -35,8 +36,8 @@ static InstrumentProfile mk(float f0) {
   p.valid = true;
   p.f0 = f0;
   p.noteDur = 2.0f;
-  // 讓「換樂器」的偵測不要在這裡插嘴：所有 profile 的頻譜包絡都一樣，
-  // 距離為 0，checkTimbreMismatch 不會有意見。這個測試只關心音高取捨。
+  // Keep the "instrument changed" detector out of this: all profiles share the same spectral
+  // envelope, so the distance is 0 and checkTimbreMismatch has no opinion. This test is only about pitch.
   for (int i = 0; i < TC_SPECENV_PTS; i++) p.specEnv[i] = -20.0f;
   for (int k = 0; k < TC_N_KEYFRAME; k++) {
     p.loud[k] = 1.0f;
@@ -47,7 +48,7 @@ static InstrumentProfile mk(float f0) {
 
 static float midiToHz(int m) { return 440.0f * powf(2.0f, (m - 69) / 12.0f); }
 
-// 庫裡「最大的相鄰間距」—— 這就是最壞情況下要移調多遠
+// Largest adjacent gap in the bank -- i.e. how far the worst case has to transpose
 static float maxGapSemis(const ProfileBank &b) {
   std::vector<float> v;
   for (int i = 0; i < b.n; i++) v.push_back(12.0f * log2f(b.p[i].f0 / 440.0f));
@@ -65,8 +66,8 @@ static float rangeSemis(const ProfileBank &b) {
   return hi - lo;
 }
 
-// 檔名排序（A, Ab, B, Bb, C, D, Db, E, Eb, F, G, Gb）產生的載入順序 ——
-// 跟音高完全無關，這正是舊版留下爛分佈的原因
+// Load order produced by filename sorting (A, Ab, B, Bb, C, D, Db, E, Eb, F, G, Gb) --
+// nothing to do with pitch, which is exactly why the old version left such a bad distribution
 static std::vector<int> trumpetLoadOrder() {
   const int semis[] = {9, 8, 11, 10, 0, 2, 1, 4, 3, 5, 7, 6};
   std::vector<int> midis;
@@ -92,7 +93,7 @@ int main() {
              gB.n, rangeSemis(gB), maxGapSemis(gB));
     check("庫被填滿", gB.n == TC_MAX_PROFILES, msg);
     check("音域仍然涵蓋整個 E3~B5（端點沒被犧牲）", rangeSemis(gB) >= 30.0f, msg);
-    // 31 個半音塞 16 組，理想的最大間距約 2~3 個半音
+    // 16 slots over 31 semitones; the ideal max gap is about 2~3 semitones
     check("最大間距 <= 4 個半音", maxGapSemis(gB) <= 4.0f, msg);
   }
 
@@ -113,22 +114,22 @@ int main() {
   // -------------------------------------------------------------------------
   printf("\n3) 規則的正例與負例\n");
   {
-    // 均勻鋪滿 C4 起算的 16 個半音
+    // Evenly cover the 16 semitones starting at C4
     gB.clear();
     for (int i = 0; i < TC_MAX_PROFILES; i++) gB.add(mk(midiToHz(60 + i)));
     check("先填滿 16 組", gB.n == 16);
 
-    // (a) 落在範圍內、而且那一段本來就很擠 -> 不值得換
+    // (a) inside the range, and that stretch is already crowded -> not worth swapping
     const int v1 = gB.evictionTarget(midiToHz(60) * powf(2.0f, 0.5f / 12.0f));
     check("範圍內、間距只有 1 個半音 -> 不換", v1 < 0);
 
-    // (b) 擴大音域 -> 一定要收
+    // (b) extends the range -> must be taken
     const int v2 = gB.evictionTarget(midiToHz(84));
     check("高過整個音域 -> 換掉某一組", v2 >= 0);
     const int v3 = gB.evictionTarget(midiToHz(40));
     check("低於整個音域 -> 換掉某一組", v3 >= 0);
 
-    // (c) 端點不能被犧牲
+    // (c) the endpoints must not be sacrificed
     int loIdx = 0, hiIdx = 0;
     for (int i = 0; i < gB.n; i++) {
       if (gB.p[i].f0 < gB.p[loIdx].f0) loIdx = i;
@@ -138,14 +139,14 @@ int main() {
     check("犧牲者不是最高音", v2 != hiIdx && v3 != hiIdx);
   }
   {
-    // (d) 範圍內但那一段是個大洞 -> 值得換
+    // (d) inside the range but that stretch is a big hole -> worth swapping
     gB.clear();
-    gB.add(mk(midiToHz(48)));                                  // C3，撐住下端
-    for (int i = 0; i < 14; i++) gB.add(mk(midiToHz(72 + i))); // C5~ 密集
-    gB.add(mk(midiToHz(96)));                                  // C7，撐住上端
+    gB.add(mk(midiToHz(48)));                                  // C3, holds the bottom end
+    for (int i = 0; i < 14; i++) gB.add(mk(midiToHz(72 + i))); // C5~ dense
+    gB.add(mk(midiToHz(96)));                                  // C7, holds the top end
     char msg[64]; snprintf(msg, sizeof(msg), "(共 %d 組)", gB.n);
     check("填滿 16 組", gB.n == 16, msg);
-    const int v = gB.evictionTarget(midiToHz(60));  // C4，落在 48~72 的大洞正中間
+    const int v = gB.evictionTarget(midiToHz(60));  // C4, right in the middle of the big hole between 48 and 72
     check("補一個 24 半音大洞的中點 -> 值得換", v >= 0);
     if (v >= 0)
       check("犧牲的是密集區裡的那一組",
@@ -156,10 +157,10 @@ int main() {
   printf("\n4) 不會退步：沒滿的時候行為完全不變\n");
   {
     gB.clear();
-    for (int i = 0; i < 12; i++) gB.add(mk(midiToHz(60 + i)));   // 鋼琴那批的規模
+    for (int i = 0; i < 12; i++) gB.add(mk(midiToHz(60 + i)));   // Size of the piano set
     check("12 組全部收下", gB.n == 12);
     check("沒滿的時候不會有人被換掉", gB.evictionTarget(midiToHz(50)) < 0);
-    // 同音高覆蓋的既有行為要保持
+    // Existing behaviour for same-pitch replacement must be preserved
     gB.add(mk(midiToHz(60)));
     check("同音高仍然是覆蓋而不是新增", gB.n == 12);
   }

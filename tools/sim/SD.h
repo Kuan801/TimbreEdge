@@ -1,4 +1,4 @@
-// tools/sim/SD.h  -  用桌機檔案系統假裝成 SD 卡
+// tools/sim/SD.h  -  fake an SD card with the desktop filesystem
 #pragma once
 
 #include "Arduino.h"
@@ -22,7 +22,7 @@ public:
   File(DIR *d, const std::string &path) : _dir(d), _path(path) { _isDir = true; }
   operator bool() const { return _f != nullptr || _dir != nullptr || _valid; }
 
-  // --- 目錄走訪（給 tcSdList 用）---
+  // --- directory traversal (for tcSdList) ---
   bool        isDirectory() const { return _isDir; }
   const char *name() const        { return _name; }
   File        openNextFile();
@@ -62,8 +62,8 @@ public:
   bool begin(int = 0) { return true; }
   bool exists(const char *p) { struct stat st; return stat(full(p).c_str(), &st) == 0; }
   bool remove(const char *p) { return ::remove(full(p).c_str()) == 0; }
-  // Teensy 的 SD 函式庫有這兩個，桌機補上同名的包裝，
-  // 採樣資料夾（SETnn）那段程式碼才能在這裡跑測試。
+  // The Teensy SD library has these two; the desktop adds wrappers with the same
+  // names so the sampling-folder (SETnn) code can be tested here.
   bool mkdir(const char *p) { return ::mkdir(full(p).c_str(), 0755) == 0; }
   bool rmdir(const char *p) { return ::rmdir(full(p).c_str()) == 0; }
   File open(const char *p, int mode = FILE_READ) {
@@ -87,20 +87,23 @@ public:
     return File(f, 0);
   }
 private:
-  // 路徑組合。三種情況都要對：
-  //   sim_sd_root = "."   一般模擬（把當前目錄當成 SD 卡的根）
-  //   sim_sd_root = ""    工具程式吃命令列給的真實路徑
-  //   p 本身就是絕對路徑  不管 root 是什麼都直接用
+  // Path composition. All three cases have to come out right:
+  //   sim_sd_root = "."     ordinary simulation (cwd acts as the SD card root)
+  //   sim_sd_root = ""      tools take the real path from the command line
+  //   p is already absolute use it directly, whatever root is
   //
-  // 原本無條件寫 root + "/" + p，於是 root 為空時 "a.wav" 會變成 "/a.wav"，
-  // 相對路徑全部解析到檔案系統根目錄 —— 症狀是「檔案明明在卻找不到」。
+  // It used to write root + "/" + p unconditionally, so with an empty root
+  // "a.wav" became "/a.wav" and every relative path resolved to the filesystem
+  // root — the symptom being "the file is right there and still can't be found".
   static std::string full(const char *p) {
     if (!p || !p[0]) return sim_sd_root.empty() ? std::string(".") : sim_sd_root;
-    // root 為空 = 工具程式，命令列給什麼路徑就用什麼（相對或絕對都行）
+    // empty root = a tool program: use whatever path the command line gave
+    // (relative or absolute, either is fine)
     if (sim_sd_root.empty()) return std::string(p);
-    // root 非空 = 模擬 SD 卡。這時候開頭的 "/" 指的是「SD 卡的根目錄」，
-    // 不是檔案系統的根 —— 一度把它當成絕對路徑放行，結果 tcSdCollectSets("/")
-    // 跑去掃真正的檔案系統根目錄，一個採樣資料夾都找不到。
+    // non-empty root = simulated SD card. Here a leading "/" means the SD card's
+    // root directory, not the filesystem root — it was once let through as an
+    // absolute path, and tcSdCollectSets("/") went off scanning the real
+    // filesystem root and found not a single sampling folder.
     return sim_sd_root + "/" + p;
   }
 };

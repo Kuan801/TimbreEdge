@@ -1,34 +1,39 @@
 // ============================================================================
-//  kbd_test.cpp  -  在桌機上驗證「USB 電腦鍵盤當琴鍵」的邏輯
+//  kbd_test.cpp  -  desktop check of the "USB computer keyboard as piano keys" logic
 //
-//  用法：  make kbd_test && ./kbd_test
+//  Usage:  make kbd_test && ./kbd_test
 //
-//  kbd_in.cpp 刻意不碰 USBHost_t36，鍵碼對應、和弦追蹤、移調、佇列全都是
-//  純邏輯，所以桌機測得到。這一點很重要：那個 USB Host 埠目前收不到 MIDI
-//  封包，如果連鍵位對應都只能靠燒錄進去用耳朵聽，就完全無從分辨是
-//  「程式錯了」還是「USB 沒通」。
+//  kbd_in.cpp deliberately never touches USBHost_t36: the keycode mapping, chord
+//  tracking, transposition and queue are all pure logic, so the desktop can test
+//  them. That matters, because the USB Host port currently receives no MIDI
+//  packets at all, and if even the key mapping could only be judged by ear after
+//  flashing, there would be no way whatsoever to tell "the code is wrong" from
+//  "USB isn't working".
 //
-//  這裡用一個假的合成器把 noteOn/noteOff 記下來，檢查送出去的音高對不對、
-//  有沒有成對。真的 AudioSynthAdditive 要拉進一堆 DSP，這裡不需要。
+//  Here a fake synth records the noteOn/noteOff calls, so we can check that the
+//  pitches sent out are right and properly paired. The real AudioSynthAdditive
+//  would drag in a pile of DSP, which is not needed here.
 // ============================================================================
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
-// ---- 假的合成器 -----------------------------------------------------------
+// ---- fake synth -----------------------------------------------------------
 //
-//  kbd_in.h 對合成器只用前置宣告，所以這裡直接提供一個同名的定義就能替換掉。
-//  用真的 AudioSynthAdditive 不行：沒載入音色時它會把每個音都丟掉，
-//  那就完全驗不出「Z 鍵送出的音高對不對」—— 而那正是最該驗的東西。
+//  kbd_in.h only forward-declares the synth, so providing a definition with the
+//  same name here is enough to substitute for it.
+//  The real AudioSynthAdditive will not do: with no timbre loaded it throws every
+//  note away, which makes "does the Z key send the right pitch" completely
+//  unverifiable — and that is exactly the thing most worth verifying.
 //
-//  TC_KBD_FAKE_SYNTH 讓 kbd_in.cpp 不要去 include 真的 additive_synth.h。
+//  TC_KBD_FAKE_SYNTH keeps kbd_in.cpp from including the real additive_synth.h.
 #define TC_KBD_FAKE_SYNTH 1
 
 class AudioSynthAdditive {
 public:
   struct Ev { bool on; int midi; };
-  std::vector<Ev>  ev;         // 所有 noteOn/noteOff，依序
-  std::vector<int> sounding;   // 目前還響著的音高
+  std::vector<Ev>  ev;         // every noteOn/noteOff, in order
+  std::vector<int> sounding;   // pitches still sounding
 
   enum NoteResult { NOTE_OK = 0 };
   NoteResult noteOn(float midi, float vel = 1.0f, float pan = 0.5f) {
@@ -61,7 +66,7 @@ static void reset() {
   gSynth.ev.clear();
   gSynth.sounding.clear();
   delete K;
-  K = new KbdInput();          // 每一節從全新狀態開始，測試之間不互相汙染
+  K = new KbdInput();          // each section starts from a clean state, so the tests don't contaminate each other
   K->begin(&gSynth);
 }
 static void dn(uint8_t c) { K->feedFromUsb(c, true);  }
@@ -105,22 +110,24 @@ int main() {
       up(row[i]);
     }
     check("Q 是 C5(72)、依序遞增到 U 是 B5(83)", ok);
-    // 上下兩排剛好差一個八度，這是「兩排能當兩個八度用」的前提
+    // The two rows are exactly one octave apart, which is the premise of
+    // "the two rows can be used as two octaves"
     check("上排 = 下排 + 12", true);
   }
 
   // -------------------------------------------------------------------------
   printf("\n3) 鍵碼不重複（重複的話某顆琴鍵會永遠彈不到）\n");
   {
-    // 這是最容易寫錯又最難用耳朵察覺的地方 —— 兩個項目填到同一個 HID 碼，
-    // 表現只是「某一顆鍵發出別人的音」，不會當機。
+    // This is the easiest thing to get wrong and the hardest to notice by ear —
+    // two entries filled in with the same HID code only shows up as "one key
+    // sounds someone else's note"; nothing crashes.
     bool dup = false;
     for (int i = 0; i < kMapN; i++)
       for (int j = i + 1; j < kMapN; j++)
         if (kMap[i].code == kMap[j].code || kMap[i].semi == kMap[j].semi) dup = true;
     check("24 個鍵碼與 24 個半音都沒有重複", !dup);
 
-    // 琴鍵不能撞到選單鍵，否則按 Enter 會同時發音
+    // Piano keys must not collide with the menu keys, or pressing Enter sounds a note too
     const uint8_t ctrl[] = { HID_UP, HID_DOWN, HID_LEFT, HID_RIGHT,
                              HID_ENTER, HID_ESC, HID_BACKSPACE, HID_SPACE };
     bool clash = false;
@@ -143,7 +150,7 @@ int main() {
     char b[32]; K->downText(b, sizeof(b));
     check("面板文字是 \"C E G\"", strcmp(b, "C E G") == 0, b);
 
-    up(HID_C);                                 // 放開中間那顆
+    up(HID_C);                                 // release the middle one
     check("放開 E 之後剩 2 個", gSynth.sounding.size() == 2);
     check("剩下的是 C 和 G", gSynth.sounding[0] == 60 || gSynth.sounding[1] == 60);
     up(HID_Z); up(HID_B);
@@ -153,8 +160,9 @@ int main() {
   // -------------------------------------------------------------------------
   printf("\n5) 重複的按下報告不會讓音卡住\n");
   {
-    // 有些鍵盤韌體會重送同一份報告。沒擋的話同一顆會 noteOn 兩次，
-    // 但放開只送一次 noteOff —— 結果就是那個音永遠關不掉。
+    // Some keyboard firmware resends the same report. Unfiltered, one key gets
+    // two noteOn calls but only one noteOff on release — and that note can then
+    // never be turned off.
     reset();
     dn(HID_Z); dn(HID_Z); dn(HID_Z);
     check("按下三次只發一次聲", gSynth.sounding.size() == 1);
@@ -165,12 +173,13 @@ int main() {
   // -------------------------------------------------------------------------
   printf("\n6) 移調：放開時必須用當初送出去的音高\n");
   {
-    // 這是實體琴鍵那邊踩過的坑：按著的時候改八度，放開時若用「新」音高去
-    // noteOff，舊的那顆就永遠關不掉。
+    // A trap already fallen into on the physical keys: change octave while a key
+    // is held, and if the release does noteOff with the new pitch, the old note
+    // can never be turned off.
     reset();
     dn(HID_Z);
     check("原位彈 Z 得到 60", lastOn() == 60);
-    dn(HID_RIGHT);                             // 升一個八度
+    dn(HID_RIGHT);                             // up one octave
     check("移調時把還響著的音收乾淨", gSynth.sounding.empty());
     check("移調量是 +12", K->transpose() == 12);
     dn(HID_Z);
@@ -208,7 +217,8 @@ int main() {
     dn(HID_SPACE);
     check("三個音全部關掉", gSynth.sounding.empty());
     check("downCount() 歸零", K->downCount() == 0);
-    // 停音之後同一顆鍵要能重按 —— 內部表沒清乾淨的話會被當成重複報告擋掉
+    // After the notes are stopped the same key must be pressable again — if the
+    // internal table is not cleared properly it gets rejected as a repeat report
     dn(HID_Z);
     check("停音後同一顆鍵可以重按", gSynth.sounding.size() == 1);
   }
@@ -225,12 +235,12 @@ int main() {
     check("依序取出 BACK",  K->popUiKey() == UI_KEY_BACK);
     check("取完之後回 NONE", K->popUiKey() == UI_KEY_NONE);
 
-    // 放開不該再送一次，否則選單會跳兩格
+    // Release must not send it a second time, or the menu jumps two entries
     dn(HID_DOWN); K->popUiKey();
     up(HID_DOWN);
     check("放開不會再送一次選單鍵", K->popUiKey() == UI_KEY_NONE);
 
-    // Backspace 跟 Esc 同義：有些鍵盤 Esc 很遠
+    // Backspace is a synonym for Esc: on some keyboards Esc is a long way off
     dn(HID_BACKSPACE);
     check("Backspace 等同 Esc", K->popUiKey() == UI_KEY_BACK);
   }
@@ -255,7 +265,8 @@ int main() {
     check("關閉時把兩個音都收掉", gSynth.sounding.empty());
     dn(HID_V);
     check("關閉後按琴鍵沒有反應", gSynth.sounding.empty());
-    // 但選單鍵仍然要能用，否則關掉之後就再也開不回來了
+    // But the menu keys must still work, otherwise once it is off there is no way
+    // to turn it back on
     dn(HID_ENTER);
     check("關閉後選單鍵仍然有效", K->popUiKey() == UI_KEY_OK);
     K->setEnabled(true);

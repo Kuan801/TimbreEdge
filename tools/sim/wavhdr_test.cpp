@@ -1,22 +1,23 @@
 // ============================================================================
-//  wavhdr_test.cpp  -  WAV 標頭在「錄到一半就斷電」之後還合不合法
+//  wavhdr_test.cpp  -  is the WAV header still valid after "power lost mid-record"
 //
-//  用法：  make wavhdr_test && ./wavhdr_test
+//  Usage:  make wavhdr_test && ./wavhdr_test
 //
-//  為什麼要有這個測試
-//  ------------------
-//  WAV 的 RIFF/data 長度本來只在 close() 補正。錄音或演奏還沒結束就斷電、
-//  按 reset、或直接把 SD 卡拔起來的話，音訊資料明明已經寫進去好幾 MB，
-//  標頭裡的 data 長度卻還是 open() 當初寫的值（StereoCapture 是 0）。
+//  Why this test exists
+//  --------------------
+//  The RIFF/data lengths in a WAV used to be patched only in close(). Lose power,
+//  press reset, or pull the SD card before a recording or performance finishes and
+//  several MB of audio are on the card, but the data length in the header is still
+//  whatever open() wrote (0 for StereoCapture).
 //
-//  這種檔案最難查的地方是「有些播放器讀得出來」：
-//      Windows 檔案總管 / Media Player -> 判定損毀，不給播
-//      ffmpeg / QuickTime / Audacity   -> 自己掃到檔尾，照樣播
-//  於是症狀變成「在 Mac 上聽得到，拿到 Windows 就說檔案壞掉」，
-//  很容易被當成播放器的問題而不是寫檔的問題。
+//  The hard part about such a file is that some players read it fine:
+//      Windows Explorer / Media Player -> declares it corrupt, refuses to play
+//      ffmpeg / QuickTime / Audacity   -> scan to end of file and play it anyway
+//  So the symptom becomes "it plays on the Mac but Windows says the file is
+//  broken", which is easily mistaken for a player problem rather than a writer one.
 //
-//  所以 WavWriter 多了 flushHeader()，recorder.cpp 每 2 秒呼叫一次。
-//  這支測試把「斷電」模擬成「不呼叫 close()」，直接檢查磁碟上的位元組。
+//  Hence WavWriter::flushHeader(), which recorder.cpp calls every 2 s. This test
+//  simulates "power loss" as "never call close()" and inspects the bytes on disk.
 // ============================================================================
 #include "../../wav_io.h"
 #include <cstdio>
@@ -30,7 +31,8 @@ static void check(const char *what, bool ok, const char *detail = "") {
   if (!ok) gFail++;
 }
 
-// 直接讀磁碟上的位元組，不透過 WavWriter —— 要驗的就是「檔案本身」
+// Read the bytes on disk directly, not through WavWriter -- the file itself is
+// what is under test
 struct Hdr { bool riff; uint32_t riffSize, dataSize; uint32_t fileSize; };
 
 static Hdr readHdr(const char *path) {
@@ -51,13 +53,15 @@ static Hdr readHdr(const char *path) {
   return h;
 }
 
-// 一個播放器會怎麼判斷這個檔案能不能播：
-//   RIFF/WAVE 標記在、data 長度不是 0、而且沒有宣告比實際還多的資料。
+// How a player decides whether this file is playable:
+//   the RIFF/WAVE markers are present, the data length is not 0, and it does not
+//   claim more data than actually exists.
 //
-// 刻意不要求「RIFF 長度剛好等於檔案大小 - 8」：錄製途中補正之後又寫進去的
-// 那幾秒，標頭本來就還沒算到，檔案尾端會多出一段沒被宣告的位元組。
-// 播放器對這種情況是忽略尾巴照樣播 —— 宣告得比實際「少」是安全的，
-// 宣告得比實際「多」才會壞。
+// Deliberately not requiring "RIFF length exactly equals file size - 8": the few
+// seconds written after the last patch are not accounted for in the header yet, so
+// there will be undeclared bytes at the end of the file. Players ignore that tail
+// and play anyway -- declaring *less* than exists is safe, declaring *more* is what
+// breaks.
 static bool playable(const Hdr &h) {
   return h.riff && h.dataSize > 0 && h.dataSize + 44 <= h.fileSize;
 }
@@ -86,30 +90,32 @@ int main() {
     WavWriter w;
     w.open("_hdrtest_cut.wav", 44100, 2);
     for (int i = 0; i < 20; i++) w.writeSamples(gBuf, 512);
-    w.flushHeader();                       // recorder.cpp 每 2 秒做的就是這件事
+    w.flushHeader();                       // This is what recorder.cpp does every 2 s
     for (int i = 0; i < 5; i++) w.writeSamples(gBuf, 512);
-    // 這裡「斷電」：不呼叫 close()，讓檔案就這樣留在卡上
+    // "Power loss" here: never call close(), just leave the file on the card
     Hdr h = readHdr("_hdrtest_cut.wav");
     char m[96];
     snprintf(m, sizeof(m), "(檔案 %u，data %u)", h.fileSize, h.dataSize);
     check("仍然是播得出來的 WAV", playable(h), m);
     check("data 長度是上一次補正時的量（最多損失那 2 秒）",
           h.dataSize == 20u * 512u * 2u);
-    // 補正之後又寫進去的資料，有多少真的落到卡上要看有沒有被 flush ——
-    // 斷電本來就會吃掉還在快取裡的部分。這裡只確認「已經補正過的那一段
-    // 一定在」，那才是這個機制保證的事。
+    // How much of the data written after the patch actually reached the card
+    // depends on flushing -- power loss eats whatever is still cached by
+    // definition. All this checks is that the already-patched portion is
+    // definitely there, which is what the mechanism guarantees.
     check("補正涵蓋的資料確實已經在檔案裡",
           h.fileSize >= 44u + 20u * 512u * 2u);
   }
 
   printf("\n=== 負對照：如果沒有 flushHeader ===\n");
   {
-    // 這一段刻意重現舊版的行為，證明上面那條檢查真的有在擋東西。
-    // 沒有這個負對照的話，「播得出來」有可能只是因為檢查太寬鬆。
+    // This section deliberately reproduces the old behaviour, to prove the check
+    // above actually catches something. Without the negative control, "it plays"
+    // might only mean the check is too lenient.
     WavWriter w;
     w.open("_hdrtest_old.wav", 44100, 2);
     for (int i = 0; i < 20; i++) w.writeSamples(gBuf, 512);
-    // 不 flushHeader、也不 close —— 這就是修正前的斷電結果
+    // No flushHeader and no close -- this is what power loss produced before the fix
     Hdr h = readHdr("_hdrtest_old.wav");
     char m[96];
     snprintf(m, sizeof(m), "(檔案 %u，data 卻是 %u)", h.fileSize, h.dataSize);
@@ -118,11 +124,13 @@ int main() {
 
   printf("\n=== 預先寫入長度的路徑（Recorder 用）===\n");
   {
-    // Recorder::start 會把預期長度先寫進標頭。錄滿的話剛好，
-    // 提早結束的話標頭會宣告得比實際多 —— 那也是壞檔，close/flushHeader 要修掉。
+    // Recorder::start writes the expected length into the header up front. If the
+    // recording runs to completion that is exact; if it stops early the header
+    // claims more than exists -- also a broken file, and close/flushHeader has to
+    // fix it.
     WavWriter w;
-    w.open("_hdrtest_short.wav", 44100, 1, 44100 * 3);   // 宣告 3 秒
-    for (int i = 0; i < 10; i++) w.writeSamples(gBuf, 512);   // 只寫 0.12 秒
+    w.open("_hdrtest_short.wav", 44100, 1, 44100 * 3);   // Declare 3 s
+    for (int i = 0; i < 10; i++) w.writeSamples(gBuf, 512);   // Write only 0.12 s
     Hdr before = readHdr("_hdrtest_short.wav");
     check("補正前：標頭宣告的比實際資料多（壞檔）",
           before.dataSize > before.fileSize - 44);

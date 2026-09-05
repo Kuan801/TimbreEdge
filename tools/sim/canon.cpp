@@ -1,12 +1,16 @@
 // ============================================================================
-//  tools/sim/canon.cpp  -  用現成的 BANK.BIN 在桌機重現「卡農」那條路徑
+//  tools/sim/canon.cpp  -  reproduce the canon path on a desktop from an
+//                          existing BANK.BIN
 //
-//  跟 sim 的差別：不重新分析素材，直接吃機器上存下來的 BANK.BIN。
-//  目的是把「實機錄到的 CANON.WAV」跟「同一組參數在桌機算出來的」對齊，
-//  才分得出問題出在參數、在合成器、還是在實機的音訊鏈（reverb / codec）。
+//  Difference from sim: it does not re-analyze the source material, it reads the
+//  BANK.BIN saved by the device directly. The point is to line up "CANON.WAV as
+//  recorded on hardware" against "the same parameters rendered on a desktop", so
+//  a problem can be pinned on the parameters, on the synthesizer, or on the
+//  hardware audio chain (reverb / codec).
 //
-//  用法：./canon BANK.BIN out.wav [MODEL.BIN] [ablate]
-//    ablate 是一串字母，用來把某個參數歸零再算一次，逐項排除：
+//  Usage: ./canon BANK.BIN out.wav [MODEL.BIN] [ablate]
+//    ablate is a string of letters that zeroes one parameter and renders again,
+//    to rule things out one at a time:
 //      i = inharmonicity   a = attackNoise   s = shimmerDepth
 //      n = noiseGain       v = vibrato       h = harmOnset
 // ============================================================================
@@ -47,7 +51,8 @@ int main(int argc, char **argv) {
   sim_sd_root = ".";
   if (!bankLoad(gBank, bankPath)) { printf("讀不到 %s\n", bankPath); return 1; }
 
-  // 逐項歸零：一次只動一個參數，才知道是哪一項在發出聲音
+  // Zero them one at a time: only one parameter changes per run, otherwise you
+  // cannot tell which one is making the sound
   for (int i = 0; i < gBank.n; i++) {
     InstrumentProfile &p = gBank.p[i];
     if (ab.find('i') != std::string::npos) p.inharmonicity = 0.0f;
@@ -56,8 +61,9 @@ int main(int argc, char **argv) {
     if (ab.find('n') != std::string::npos) p.noiseGain     = 0.0f;
     if (ab.find('v') != std::string::npos) { p.vibratoCents = 0.0f; p.vibratoHz = 0.0f; }
     if (ab.find('h') != std::string::npos) for (int k = 0; k < TC_N_HARM; k++) p.harmOnset[k] = 0.0f;
-    // r = 「修過的」：B 歸零（提琴本來就該是 0）、shimmer 拉回合理區間、
-    //     起音噪聲設上限。目的是聽聽看這三項修好之後差多少。
+    // r = "fixed": B zeroed (a violin should be 0 anyway), shimmer pulled back
+    //     into a sensible range, attack noise capped. The point is to hear how
+    //     much these three fixes are worth.
     if (ab.find('r') != std::string::npos) {
       p.inharmonicity = 0.0f;
       if (p.shimmerDepth <= 0.001f || p.shimmerDepth >= 0.199f) p.shimmerDepth = 0.12f;
@@ -67,9 +73,10 @@ int main(int argc, char **argv) {
   }
   if (!ab.empty()) printf("[ABLATE] 已歸零：%s\n", ab.c_str());
 
-  // 韌體在演奏前會呼叫 applyScaleRangeFromBank()，把「音域」設成音色庫的
-  // 範圍再往上一個八度 —— pickOctaveShift() 用的就是這組全域值。
-  // 少了這一步，八度安置會用預設的 C3~B4，算出來的移調量跟實機不一樣。
+  // Before playing, the firmware calls applyScaleRangeFromBank() to set the range
+  // to the bank's coverage plus one octave -- those are the globals
+  // pickOctaveShift() reads. Without this step the octave placement falls back to
+  // the default C3~B4 and the computed transposition differs from the hardware.
   {
     int lo = 127, hi = 0;
     for (int i = 0; i < gBank.n; i++) {

@@ -1,25 +1,30 @@
 // ============================================================================
-//  midi_in.h  -  USB Host MIDI 鍵盤輸入
+//  midi_in.h  -  USB Host MIDI keyboard input
 //
-//  Teensy 4.1 底部那排 5 針就是獨立的 USB Host 埠，跟拿來燒錄／看序列埠的
-//  Micro-USB 完全分開，所以插著鍵盤演奏的同時還是可以看 Serial 訊息。
+//  The row of 5 pins on the underside of the Teensy 4.1 is an independent USB
+//  Host port, completely separate from the Micro-USB used for flashing and the
+//  serial monitor, so a keyboard can be plugged in and played while Serial
+//  messages are still readable.
 //
-//  接線（Teensy 4.1 底面，靠近 SD 卡插槽的 5 針）：
-//      5V  -> USB A 母座第 1 腳 (VBUS，紅)
-//      D-  -> 第 2 腳（白）
-//      D+  -> 第 3 腳（綠）
-//      GND -> 第 4 腳（黑）
-//      第 5 針是外殼/遮蔽，接母座金屬外殼即可，不接也能動
-//  順序不要弄反：D+/D- 接反的話裝置完全不會被列舉出來，也不會有任何錯誤訊息。
+//  Wiring (Teensy 4.1 underside, the 5 pins near the SD card slot):
+//      5V  -> USB A socket pin 1 (VBUS, red)
+//      D-  -> pin 2 (white)
+//      D+  -> pin 3 (green)
+//      GND -> pin 4 (black)
+//      Pin 5 is shield; connect it to the socket's metal shell, or leave it off
+//  Do not swap the order: with D+/D- reversed the device is never enumerated at
+//  all, and there is no error message of any kind.
 //
-//  電源注意：這個埠的 5V 來自 VUSB，由 Teensy 上的限流開關控制。
-//  如果你改用外部電源供電（VIN），必須割開背面 VUSB-VIN 之間的走線，
-//  否則會把電倒灌回電腦的 USB 埠。Keystation Mini 32 是匯流排供電的低耗電
-//  裝置，用電腦供電時直接接就好。
+//  Power note: 5V on this port comes from VUSB, through the current-limiting
+//  switch on the Teensy. If you power the board externally (VIN), you must cut
+//  the VUSB-VIN trace on the back, or you will backfeed power into the computer's
+//  USB port. The Keystation Mini 32 is a low-power bus-powered device, so it can
+//  be connected directly while the computer supplies power.
 //
-//  為什麼另外開一個模組而不是全塞進 .ino：
-//  桌機模擬器沒有 USBHost_t36，把它隔離起來就能用一個 TC_USE_USB_MIDI
-//  開關整段關掉，模擬器照樣編得過、其他程式碼一行都不用改。
+//  Why this is a separate module rather than being folded into the .ino:
+//  the desktop simulator has no USBHost_t36, and isolating it here means a single
+//  TC_USE_USB_MIDI switch turns the whole thing off -- the simulator still
+//  compiles and not one line of other code has to change.
 // ============================================================================
 #pragma once
 
@@ -27,26 +32,28 @@
 #include "config.h"
 #include "additive_synth.h"
 
-// 這些數字對應 M-AUDIO Keystation Mini 32 MK3 的出廠設定。
-// 換別的鍵盤多半也通用，因為都是標準 MIDI CC。
-#define TC_MIDI_CC_MOD      1     // MOD 鍵
-#define TC_MIDI_CC_VOLUME   7     // 音量旋鈕
-#define TC_MIDI_CC_SUSTAIN 64     // SUST 鍵
+// These numbers match the factory settings of the M-AUDIO Keystation Mini 32 MK3.
+// They will usually work with other keyboards too, since they are standard MIDI CCs.
+#define TC_MIDI_CC_MOD      1     // MOD button
+#define TC_MIDI_CC_VOLUME   7     // Volume knob
+#define TC_MIDI_CC_SUSTAIN 64     // SUST button
 #define TC_MIDI_CC_ALLOFF 123
 
-// 彎音輪的最大幅度（半音）。標準 MIDI 慣例是 ±2 個半音。
+// Full-scale pitch bend range (semitones). The standard MIDI convention is ±2.
 #define TC_MIDI_BEND_RANGE  2.0f
-// 調變輪推到底時額外加多少顫音（cents）
+// How much extra vibrato (cents) at full modulation wheel
 #define TC_MIDI_MOD_CENTS  35.0f
 
 class MidiInput {
 public:
   void begin(AudioSynthAdditive *s);
 
-  // 在 loop() 裡盡量常呼叫。USB Host 的列舉與收包都在這裡面做。
+  // Call as often as possible from loop(). USB Host enumeration and packet
+  // reception both happen in here.
   void service();
 
-  // 逐環節的計數。「按了沒聲音」時要能指出斷在哪一段，用猜的查不完。
+  // Per-stage counters. When "I pressed a key and nothing happened", these have to
+  // say which stage it broke at; guessing never finishes.
   void report() const;
   void setVerbose(bool v) { _verbose = v; }
   bool verbose() const { return _verbose; }
@@ -56,15 +63,18 @@ public:
   uint32_t    noteCount()   const { return _notes; }
   int         heldNotes()   const { return _nHeld; }
 
-  // 分析／訓練這類會長時間阻塞的流程開始前呼叫，避免卡住的音一直響
+  // Call before a long blocking flow such as analysis or training, so no note is
+  // left stuck sounding
   void panic();
 
-  // 餵一個 MIDI 訊息進來。service() 解析完 USB 之後就是呼叫這個。
+  // Feed in one MIDI message. This is what service() calls once it has parsed USB.
   //
-  // 刻意拉成公開介面，理由有二：
-  //   1) 這段邏輯（延音踏板、力度曲線、彎音）跟 USB 完全無關，
-  //      拉出來之後桌機模擬器就測得到，不必真的插一台鍵盤。
-  //   2) 之後想加 DIN-5 MIDI 或 USB device MIDI，只要再接一個來源進來就好。
+  // Deliberately public, for two reasons:
+  //   1) This logic (sustain pedal, velocity curve, pitch bend) has nothing to do
+  //      with USB, so pulling it out makes it testable in the desktop simulator
+  //      without plugging in a real keyboard.
+  //   2) Adding DIN-5 MIDI or USB device MIDI later is then just another source
+  //      feeding into the same entry point.
   void feed(uint8_t status, uint8_t d1, uint8_t d2);
 
 private:
@@ -75,22 +85,23 @@ private:
   AudioSynthAdditive *_synth = nullptr;
   bool     _connected = false;
   char     _name[48]  = "";
-  uint32_t _notes     = 0;      // 收到的 NoteOn
-  uint32_t _msgs      = 0;      // 收到的所有 MIDI 訊息
-  uint32_t _ccs       = 0;      // 收到的 Control Change
-  uint32_t _sounded   = 0;      // 真的發出聲音的音符
-  uint32_t _noTimbre  = 0;      // 因為沒載入音色而被丟掉的音符
-  uint32_t _noVoice   = 0;      // 因為聲部搶不到而被丟掉的音符
-  uint32_t _rawReads  = 0;      // 底層 read() 成功解出訊息的次數
-  int      _nPorts    = 0;      // 被認領的 USB 介面數
+  uint32_t _notes     = 0;      // NoteOn messages received
+  uint32_t _msgs      = 0;      // All MIDI messages received
+  uint32_t _ccs       = 0;      // Control Change messages received
+  uint32_t _sounded   = 0;      // Notes that actually produced sound
+  uint32_t _noTimbre  = 0;      // Notes dropped because no timbre was loaded
+  uint32_t _noVoice   = 0;      // Notes dropped because no voice could be allocated
+  uint32_t _rawReads  = 0;      // Times the low-level read() successfully decoded a message
+  int      _nPorts    = 0;      // Number of USB interfaces claimed
   bool     _verbose   = false;
-  bool     _warned    = false;  // 「沒有音色」的警告只印一次，不洗版
+  bool     _warned    = false;  // Print the "no timbre" warning once, do not flood the log
 
-  // 延音踏板：踩著的時候 NoteOff 先記下來，放開才真的送出去
+  // Sustain pedal: while it is held, NoteOff is recorded and only actually sent
+  // when the pedal is released
   bool     _sustain = false;
-  uint8_t  _held[16];          // 踩踏板期間已經放開、等著被切掉的音
+  uint8_t  _held[16];          // Notes already released during the pedal hold, waiting to be cut
   int      _nDeferred = 0;
-  int      _nHeld     = 0;     // 目前實際壓著的鍵數（給面板顯示）
+  int      _nHeld     = 0;     // How many keys are physically held right now (for the panel)
 };
 
 extern MidiInput gMidi;

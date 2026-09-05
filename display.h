@@ -1,19 +1,23 @@
 // ============================================================================
-//  display.h  -  128x64 OLED 狀態面板
+//  display.h  -  128x64 OLED status panel
 //
-//  用 U8g2 驅動，因為它一個函式庫就涵蓋 SSD1306 / SH1106 / SSD1309，
-//  換模組只要改 config.h 一行，不必換函式庫。
+//  Driven through U8g2, because one library covers SSD1306 / SH1106 / SSD1309:
+//  swapping the module is a one-line change in config.h, not a change of library.
 //
-//  介面刻意做成「設定狀態 + 由 loop() 限流刷新」：
-//    displaySet*()  只更新記憶體裡的狀態，極快，可以隨便呼叫
-//    displayService()  在 loop() 呼叫，內部每 TC_OLED_REFRESH_MS 才真的畫一次
-//    displayForce()    立刻畫（分析/訓練這種阻塞流程中用）
+//  The interface is deliberately "set state + rate-limited refresh from loop()":
+//    displaySet*()     only updates state in memory; it is cheap, call it freely
+//    displayService()  called from loop(); actually redraws at most every
+//                      TC_OLED_REFRESH_MS
+//    displayForce()    redraw right now (used inside blocking flows such as
+//                      analysis and training)
 //
-//  為什麼要限流：128x64 全畫面 = 1024 bytes，@400kHz I2C 約 20 ms。
-//  每次 loop 都刷會把 loop() 卡死。Player 用累積時間排程所以不會漂移，
-//  但錄音時仍要避免長時間阻塞。
+//  Why rate-limit: a full 128x64 frame is 1024 bytes, about 20 ms over 400 kHz
+//  I2C. Refreshing every loop would stall loop() completely. Player schedules on
+//  accumulated time so it will not drift, but long blocking still has to be
+//  avoided while recording.
 //
-//  TC_USE_OLED = 0 時全部變成空函式，程式其他部分不用改。
+//  With TC_USE_OLED = 0 everything here becomes an empty function and the rest of
+//  the code is unchanged.
 // ============================================================================
 #pragma once
 
@@ -31,31 +35,34 @@ enum TcState : uint8_t {
 };
 
 void displayBegin();
-void displayScanI2C();                 // 開機診斷：印出匯流排上有哪些位址
+void displayScanI2C();                 // Boot diagnostic: print which addresses are on the bus
 
 void displaySetState(TcState s, const char *detail = nullptr);
 
-// 目前是哪個狀態。給選單判斷「畫面現在有沒有被狀態面板佔著」——
-// 佔著的時候選單不能畫回去，否則面板一瞬間就被蓋掉。
+// Which state we are in. Lets the menu tell whether a status panel currently owns
+// the display -- while it does, the menu must not draw over it, or the panel is
+// wiped out the instant it appears.
 TcState displayState();
 
-// 現在畫面上是選單還是狀態面板。
-// 拉成公開查詢是為了讓「選單不該蓋掉狀態面板」這條規則在桌機上驗得到 ——
-// 它壞掉的表現是「按了沒反應」，用眼睛看 OLED 很難查出來。
+// Whether the menu or a status panel is on screen right now.
+// Exposed as a public query so that the rule "the menu must not cover a status
+// panel" can be tested on a desktop -- when it breaks, the symptom is "pressing
+// a key does nothing", which is very hard to spot by watching the OLED.
 bool displayMenuVisible();
-void displaySetProgress(float p);      // 0..1；負值 = 不畫進度條
-void displaySetLine(int idx, const char *text);   // idx 0..3 的自由文字列
+void displaySetProgress(float p);      // 0..1; negative = do not draw the progress bar
+void displaySetLine(int idx, const char *text);   // Free-text lines, idx 0..3
 
-// 狀態列資訊（右上角與底部）
+// Status-line information (top right and bottom)
 void displaySetSystem(bool sdOk, bool hasModel, bool hasProfile);
 void displaySetTrainInfo(int samples, int pitches);
 void displaySetProfileInfo(float f0, const char *noteName);
 
-// 選單畫面。傳 nullptr 的 title 表示「不在選單」，回到原本的狀態畫面。
-// 用「把要畫的字串交進來」而不是讓 display.cpp 去讀 Ui —— 這樣 ui.cpp
-// 不必知道 u8g2 的存在，桌機上才測得到。
+// Menu screen. A nullptr title means "not in the menu" and returns to the
+// previous status screen. The strings to draw are handed in rather than having
+// display.cpp read Ui -- that way ui.cpp need not know u8g2 exists, which is
+// what makes it testable on a desktop.
 void displaySetMenu(const char *title, const char (*rows)[26], int nRows,
                     int cursorRow, int firstRow, int totalRows, bool editing);
 
-void displayService();                 // loop() 裡呼叫
-void displayForce();                   // 立刻重繪
+void displayService();                 // Call from loop()
+void displayForce();                   // Redraw immediately

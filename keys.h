@@ -1,33 +1,38 @@
 // ============================================================================
-//  keys.h  -  12 顆實體琴鍵（C4 ~ B4）
+//  keys.h  -  12 physical piano keys (C4 ~ B4)
 //
-//  接線：每顆按鈕一腳接對應腳位、另一腳接 GND。用內部上拉，不需外接電阻。
-//  12 顆共用一條 GND，所以總共 13 條線。
+//  Wiring: one leg of each button to its pin, the other to GND. Internal pull-ups,
+//  so no external resistors. All 12 share one GND wire, 13 wires in total.
 //
-//        白鍵（近側那排，跟 0~12 同一邊）
+//        White keys (the near row, same side as 0~12)
 //           C4=24   D4=25   E4=26   F4=27   G4=28   A4=29   B4=30
-//        黑鍵（遠側那排，跟 13~23 同一邊）
+//        Black keys (the far row, same side as 13~23)
 //           C#4=34  D#4=35  F#4=36  G#4=37  A#4=38
 //
-//  Teensy 4.1 尾端本來就是兩排分開的（近側 24~33、遠側 34~41），
-//  所以照真實鍵盤的排列分：上面一排全是黑鍵、下面一排全是白鍵，
-//  兩組各自連續，插錯位置一眼看得出來。
+//  The tail of the Teensy 4.1 is already split into two rows (near 24~33, far
+//  34~41), so they are divided the way a real keyboard is laid out: the upper row
+//  all black keys, the lower row all white keys, each group contiguous, so a wire
+//  in the wrong place is obvious at a glance.
 //
-//  這一段是 audio shield 蓋不到的地方，跟 shield 完全不打架。
-//  但出廠是沒有焊排針的 —— 接線方式見 README 的「尾端懸空怎麼接」。
+//  This stretch is out of the audio shield's reach, so it does not conflict with
+//  the shield at all. It ships without headers soldered on, though — see
+//  "wiring the free tail" in the README for how to connect it.
 //
-//  --- 為什麼直接接 12 支腳位，而不是 4x3 矩陣 ---------------------------------
+//  --- Why 12 pins directly instead of a 4x3 matrix ----------------------------
 //
-//  矩陣只要 7 支腳位，但同時按三顆以上會出現「鬼鍵」—— 沒按的音也會響。
-//  要避免就得在每顆按鍵串一顆二極體，12 顆按鍵 12 顆二極體。
-//  Teensy 4.1 空著的腳位有 21 支，直接接完全夠用，而且真的能彈和弦。
-//  這台合成器有 8 個聲部，同時按 8 個鍵都發得出來 —— 用矩陣就白費了。
+//  A matrix needs only 7 pins, but pressing three or more keys at once produces
+//  ghost keys — notes sound that were never pressed. Avoiding that needs a diode
+//  in series with every button: 12 buttons, 12 diodes.
+//  The Teensy 4.1 has 21 free pins, more than enough to wire them directly, and
+//  then chords really work. This synth has 8 voices, so 8 keys at once all sound —
+//  with a matrix that would be wasted.
 //
-//  --- 為什麼跟 buttons.h 分開 ------------------------------------------------
+//  --- Why this is separate from buttons.h ------------------------------------
 //
-//  選單按鈕要的是「按一下觸發一次」加上長按連發；琴鍵要的是「按下發聲、
-//  放開收音」，而且要能同時按。兩種語意不同，硬塞成同一個類別只會讓
-//  兩邊都彆扭。
+//  The menu buttons want "one press, one event" plus auto-repeat on hold; the
+//  piano keys want "press sounds, release damps", and they have to work
+//  simultaneously. The two semantics differ, and forcing them into one class only
+//  makes both sides awkward.
 // ============================================================================
 #pragma once
 
@@ -41,18 +46,18 @@ class Keys {
 public:
   void begin(AudioSynthAdditive *synth);
 
-  // 在 loop() 裡呼叫。只有 enabled() 時才會真的發聲。
+  // Call from loop(). It only actually sounds when enabled().
   void service();
 
-  // 進出琴鍵模式。離開時會把還按著的音收乾淨。
+  // Enter / leave key mode. Leaving cleanly releases any notes still held.
   void setEnabled(bool on);
   bool enabled() const { return _on; }
 
-  // 移調（八度按鈕用得到）。以半音為單位，0 = C4~B4 原位。
+  // Transpose (used by the octave buttons). In semitones; 0 = C4~B4 as-is.
   void setTranspose(int8_t semi);
   int8_t transpose() const { return _transpose; }
 
-  // 給 OLED 顯示：哪些鍵正被按著（bit 0 = C4）
+  // For the OLED display: which keys are currently held (bit 0 = C4)
   uint16_t downMask() const { return _mask; }
   int      downCount() const;
 
@@ -67,12 +72,12 @@ private:
     bool     stable  = false;
     bool     raw     = false;
     uint32_t changed = 0;
-    uint8_t  playing = 0;    // 實際送出去的 MIDI 音高（放開時要用同一個關掉）
+    uint8_t  playing = 0;    // the MIDI pitch actually sent (release has to use the same one to turn it off)
   };
   K _k[TC_N_KEYS];
 };
 
 extern Keys gKeys;
 
-// 把按下的鍵排成 "C E G" 這種字串，給 OLED 用
+// lay the held keys out as a string like "C E G", for the OLED
 void keysDownText(char *out, size_t cap);

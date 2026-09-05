@@ -28,7 +28,8 @@ void Keys::setTranspose(int8_t semi) {
   if (semi < -24) semi = -24;
   if (semi >  24) semi =  24;
   if (semi == _transpose) return;
-  // 移調前先把正在響的音收掉，否則放開時會用新音高去 noteOff，關不掉舊的
+  // Kill sounding notes before transposing, otherwise the release would noteOff
+  // the new pitch and the old note would never stop
   if (_on) setEnabled(false), setEnabled(true);
   _transpose = semi;
 }
@@ -65,21 +66,23 @@ void Keys::service() {
       if (midi > 127) midi = 127;
       k.playing = (uint8_t)midi;
       _mask |= (uint16_t)(1u << i);
-      // 力度固定 —— 輕觸開關量不出力度。要有力度就得換成有壓力感測的鍵，
-      // 而且素材也只有單一力度，量得出來也還原不了。
+      // Fixed velocity -- a tactile switch cannot measure force. Velocity would
+      // need pressure-sensing keys, and the source material is single-velocity
+      // anyway, so it could not be reproduced even if we could measure it.
       _synth->noteOn((float)midi, 0.85f, 0.5f);
 
     } else if (!raw && k.stable) {
       k.stable = false;
       _mask &= (uint16_t)~(1u << i);
-      // 用當初送出去的那個音高關掉，不是重新算 —— 中途移調過就會對不上
+      // Release the pitch we actually sent, not a recomputed one -- a transpose
+      // in between would make them disagree
       if (k.playing) _synth->noteOff((float)k.playing);
       k.playing = 0;
     }
   }
 }
 
-// 給面板用：把按下的鍵排成 "C E G" 這種字串
+// For the panel: format the held keys as a string like "C E G"
 void keysDownText(char *out, size_t cap) {
   out[0] = 0;
   size_t used = 0;

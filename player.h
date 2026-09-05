@@ -1,7 +1,7 @@
 // ============================================================================
-//  player.h  -  樂譜排程器
-//  在 loop() 裡輪詢，依 tick 時間軸對合成器下 noteOn / noteOff。
-//  用 micros() 累積時間，不會因為 loop 被 SD 存取卡住而漂移。
+//  player.h  -  score scheduler
+//  Polled from loop(); drives noteOn / noteOff on the synth along a tick timeline.
+//  Time is accumulated with micros(), so it won't drift when loop() stalls on SD access.
 // ============================================================================
 #pragma once
 
@@ -13,7 +13,7 @@
 class Player {
 public:
   void begin(AudioSynthAdditive *synth);
-  void load();                                  // 重新產生樂譜（演奏中會先停）
+  void load();                                  // Regenerate the score (playback is stopped first)
   void start(float bpm = TC_BPM);
   void stop();
   void service();

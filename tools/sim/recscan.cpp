@@ -1,13 +1,15 @@
 // ============================================================================
-//  recscan  -  把一堆 WAV 丟進去，看機器上會給出什麼判定
+//  recscan  -  throw a pile of WAVs at it and see what verdict the device gives
 //
-//  用途：改了 rec_check.cpp 的門檻之後，拿真實素材驗一遍再燒錄。
-//  reccheck_test 驗的是規則本身（給定數字會不會判對），這支驗的是
-//  「分析器量出來的數字」跟「規則」接起來的結果 —— 兩件不同的事。
+//  Purpose: after changing a threshold in rec_check.cpp, run real material
+//  through it once before flashing.
+//  reccheck_test checks the rules themselves (given these numbers, is the
+//  verdict right); this one checks what comes out when "the numbers the
+//  analyzer measures" are wired to "the rules" -- two different things.
 //
-//  用法：
-//    ./recscan 乾淨素材/*.wav          <- 應該全部 ok
-//    ./recscan 麥克風錄的/*.WAV        <- 錄壞的應該被抓出來
+//  Usage:
+//    ./recscan clean-material/*.wav    <- should all be ok
+//    ./recscan mic-takes/*.WAV         <- the bad takes should get caught
 // ============================================================================
 #include "../../analyzer.h"
 #include "../../profile.h"
@@ -26,8 +28,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // 桌機的 SD 模擬預設會在路徑前面接一個根目錄（模擬 SD 卡的 "/"）。
-  // 這支工具吃的是命令列給的真實路徑，所以要把它清掉。
+  // The desktop SD emulation prepends a root directory to paths by default
+  // (emulating the SD card's "/"). This tool takes real paths off the command
+  // line, so clear it.
   extern std::string sim_sd_root;
   sim_sd_root = "";
 
@@ -56,7 +59,7 @@ int main(int argc, char **argv) {
     else if (v == REC_WARN) nWarn++;
     else                    nBad++;
 
-    // 只留檔名，路徑太長會把表格撐爛
+    // Basename only; long paths blow the table apart
     const char *base = strrchr(argv[i], '/');
     base = base ? base + 1 : argv[i];
 
@@ -70,7 +73,7 @@ int main(int argc, char **argv) {
     if (recCheckSnrKnown(rc.noiseFloor))
       snprintf(snr, sizeof(snr), "%.0f", recCheckSnrDb(rc.noiseFloor));
     else
-      snprintf(snr, sizeof(snr), "--");      // 起音在第 0 格，沒有底噪可量
+      snprintf(snr, sizeof(snr), "--");      // Attack sits in bin 0, so there is no noise floor to measure
 
     printf("%-28.28s %-6s %5s %6.3f %5s %3d %5.2f %5.2f  %s / %s\n",
            base,

@@ -2,7 +2,7 @@
 #include "ui.h"
 
 // ============================================================================
-//  狀態（不管有沒有接面板都會維護，序列埠診斷也用得到）
+//  State (maintained with or without a panel; serial diagnostics use it too)
 // ============================================================================
 static struct {
   TcState  state      = TC_ST_BOOT;
@@ -22,7 +22,7 @@ static struct {
 
   bool     dirty      = true;
 
-  // --- 選單 ---
+  // --- Menu ---
   bool     menuOn     = false;
   char     menuTitle[26] = {0};
   char     menuRow[UI_VISIBLE_ROWS][26] = {{0}};
@@ -41,9 +41,10 @@ static void copyStr(char *dst, size_t cap, const char *src) {
 }
 
 void displaySetState(TcState s, const char *detail) {
-  // 進入任何「忙碌」狀態時，狀態畫面自動把選單推開。
-  // 這樣分析/訓練/演奏/錄音的進度條一定看得到，不用在每個流程裡各自記得
-  // 去關選單 —— 那種散在各處的呼叫遲早會漏掉一個。
+  // Entering any "busy" state makes the status screen push the menu aside, so
+  // the analyse/train/play/record progress bar is always visible and no flow
+  // has to remember to close the menu itself -- calls scattered around like
+  // that always end up missing one.
   if (s != TC_ST_IDLE && s != TC_ST_BOOT) gS.menuOn = false;
   gS.state = s;
   copyStr(gS.detail, sizeof(gS.detail), detail);
@@ -71,23 +72,28 @@ void displaySetProfileInfo(float f0, const char *noteName) {
 
 // ============================================================================
 // ---------------------------------------------------------------------------
-//  選單狀態。刻意放在 #if TC_USE_OLED 之外 —— 它只寫 gS，一行 u8g2 都沒碰，
-//  搬出來之後 tools/sim/display_test.cpp 就驗得到「選單不會蓋掉狀態面板」。
-//  這條規則壞掉時螢幕還在更新，看起來不像當機，用眼睛盯 OLED 很難查。
+//  Menu state. Deliberately outside #if TC_USE_OLED -- it only writes gS and
+//  never touches a line of u8g2, so once it lives out here
+//  tools/sim/display_test.cpp can verify "the menu must not cover the status
+//  panel". When that rule breaks the screen keeps updating, so it looks nothing
+//  like a hang and eyeballing the OLED will hardly ever find it.
 // ---------------------------------------------------------------------------
 void displaySetMenu(const char *title, const char (*rows)[26], int nRows,
                     int cursorRow, int firstRow, int totalRows, bool editing) {
   if (!title) { gS.menuOn = false; gS.dirty = true; return; }
 
-  // 忙碌狀態下拒絕開選單。
+  // Refuse to open the menu while busy.
   //
-  // displaySetState() 進入忙碌狀態時已經把選單推開一次了，但那擋不住
-  // 「之後才呼叫 displaySetMenu()」的人 —— Auto sampling 就是這樣壞的：
-  // 指令把畫面切成採樣面板，選單卻在同一次按鍵處理的結尾又畫了回去，
-  // 面板存在的時間短到看不見，電平表也永遠出不來。
+  // displaySetState() already pushes the menu aside when it enters a busy
+  // state, but that does not stop whoever calls displaySetMenu() afterwards --
+  // that is exactly how Auto sampling broke: the command switched the screen to
+  // the sampling panel, then the menu was drawn back over it at the end of the
+  // same key handler, so the panel existed too briefly to see and the level
+  // meter never appeared.
   //
-  // 擋在這裡而不是只改呼叫端，是因為呼叫端會越來越多，
-  // 而「選單不該蓋掉狀態面板」這條規則只有一個地方講得清楚。
+  // Blocked here rather than only at the call sites, because the call sites
+  // keep multiplying, and "the menu must not cover the status panel" is a rule
+  // that can only be stated clearly in one place.
   if (gS.state != TC_ST_IDLE && gS.state != TC_ST_BOOT) {
     gS.menuOn = false;
     gS.dirty  = true;
@@ -125,9 +131,9 @@ void displaySetMenu(const char *title, const char (*rows)[26], int nRows,
 
 static bool gOledOk = false;
 
-// 面板上用 ASCII。CJK 字型在 U8g2 裡動輒 1 MB 以上，而且 128x64 只放得下
-// 兩三個中文字，資訊密度反而更差。序列埠仍然是完整中文。
-#define FONT_SMALL  u8g2_font_5x8_tf         // 25 字 x 8 列
+// ASCII on the panel. A CJK font in U8g2 easily runs past 1 MB, and 128x64 only
+// fits two or three glyphs, so density is worse. Serial is still full Chinese.
+#define FONT_SMALL  u8g2_font_5x8_tf         // 25 chars x 8 rows
 #define FONT_TITLE  u8g2_font_6x12_tf
 
 // ---------------------------------------------------------------------------
@@ -192,19 +198,20 @@ static const char *stateName(TcState s) {
 }
 
 // ---------------------------------------------------------------------------
-//  選單畫面
+//  Menu screen
 //
-//  128x64 用 6x10 的字型大約 21 字 x 6 列。扣掉標題列與底部提示，
-//  中間剛好放 4 列 —— 這就是 UI_VISIBLE_ROWS = 4 的由來。
+//  128x64 with the 6x10 font is about 21 chars x 6 rows. Minus the title row
+//  and the bottom hint, exactly 4 rows are left -- hence UI_VISIBLE_ROWS = 4.
 static void drawMenu() {
   u8g2.clearBuffer();
   u8g2.setFont(FONT_SMALL);
 
   u8g2.drawStr(0, 0, gS.menuTitle);
-  // 右上角顯示「第幾項 / 共幾項」，長清單捲動時才知道自己在哪
+  // Top right shows "item / total", so a long scrolling list still says where you are
   if (gS.menuTotal > UI_VISIBLE_ROWS) {
-    // 24 bytes：兩個 int 最長各 11 字元加一個斜線加結尾。
-    // 實際上選單頂多十幾項，但編譯器不知道，開夠大比加 -Wno- 誠實。
+    // 24 bytes: two ints of at most 11 chars each, a slash, and the terminator.
+    // Menus hold a dozen items at most, but the compiler cannot know that, and
+    // sizing it big enough is more honest than adding a -Wno- flag.
     char pos[24];
     snprintf(pos, sizeof(pos), "%d/%d", (int)gS.menuCur + 1, (int)gS.menuTotal);
     u8g2.drawStr(128 - u8g2.getStrWidth(pos), 0, pos);
@@ -215,7 +222,7 @@ static void drawMenu() {
     const int y = 14 + i * 10;
     const bool sel = (gS.menuFirst + i) == gS.menuCur;
     if (sel) {
-      // 反白整列比畫一個小箭頭好認 —— 在 OLED 上小箭頭很容易看漏
+      // Inverting the whole row reads better than a small arrow -- arrows are easy to miss on an OLED
       u8g2.drawBox(0, y - 1, 128, 10);
       u8g2.setDrawColor(0);
       u8g2.drawStr(3, y, gS.menuRow[i]);
@@ -236,17 +243,17 @@ static void draw() {
   u8g2.clearBuffer();
   u8g2.setFont(FONT_SMALL);
 
-  // ---- 標題列 -----------------------------------------------------------
+  // ---- Title row ----------------------------------------------------------
   u8g2.drawStr(0, 0, stateName(gS.state));
   {
-    // 右上角：音源模式，這是「卡農到底用什麼發聲」的即時證據
+    // Top right: the voice mode -- live evidence of what the canon is actually sounding with
     const char *mode = gS.hasModel ? "MLP" : "KEYFR";
     int w = u8g2.getStrWidth(mode);
     u8g2.drawStr(128 - w, 0, mode);
   }
   u8g2.drawHLine(0, 10, 128);
 
-  // ---- 主要區塊 ---------------------------------------------------------
+  // ---- Main area ----------------------------------------------------------
   int y = 14;
   if (gS.detail[0]) { u8g2.drawStr(0, y, gS.detail); y += 9; }
 
@@ -262,7 +269,7 @@ static void draw() {
     if (gS.line[i][0]) { u8g2.drawStr(0, y, gS.line[i]); y += 9; }
   }
 
-  // ---- 底部狀態列 -------------------------------------------------------
+  // ---- Bottom status bar --------------------------------------------------
   u8g2.drawHLine(0, 55, 128);
   char foot[32];
   if (gS.state == TC_ST_IDLE || gS.state == TC_ST_BOOT) {
@@ -284,7 +291,7 @@ static void draw() {
 void displayService() {
   if (!gOledOk) return;
   uint32_t now = millis();
-  if (!gS.dirty && (now - gLastDraw) < 1000) return;      // 沒變就 1 秒心跳一次
+  if (!gS.dirty && (now - gLastDraw) < 1000) return;      // nothing changed: one heartbeat per second
   if ((now - gLastDraw) < TC_OLED_REFRESH_MS) return;
   gLastDraw = now;
   gS.dirty  = false;
@@ -299,7 +306,7 @@ void displayForce() {
 }
 
 // ============================================================================
-#else   // TC_USE_OLED == 0：全部變空函式
+#else   // TC_USE_OLED == 0: everything becomes an empty stub
 
 void displayBegin()   {}
 void displayScanI2C() {}

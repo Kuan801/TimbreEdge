@@ -1,14 +1,16 @@
 // ============================================================================
-//  ui_test.cpp  -  在桌機上驗證 OLED 選單的導航邏輯
+//  ui_test.cpp  -  verifying the OLED menu's navigation logic on the desktop
 //
-//  用法：  make ui_test && ./ui_test
+//  Usage:  make ui_test && ./ui_test
 //
-//  ui.cpp 刻意不碰 Arduino 的任何東西，所以整個選單狀態機在桌機上跑得動。
-//  「按下去有沒有跑到對的地方」這種事不該靠燒進 Teensy 用眼睛看 ——
-//  之前 USB MIDI 那段就是因為只能在硬體上驗，來回花掉好幾輪。
+//  ui.cpp deliberately touches nothing from Arduino, so the whole menu state
+//  machine runs on the desktop. "Does pressing this get to the right place" should
+//  not depend on flashing a Teensy and watching with your eyes -- USB MIDI was
+//  exactly that, verifiable only on hardware, and it cost several round trips.
 //
-//  這裡用的選單樹是 TimbreClone.ino 那份的複本。它必須跟本尊一致，
-//  所以最後一項測試會檢查頁數／項目數對不對，改了本尊卻忘了改這裡就會失敗。
+//  The menu tree used here is a copy of the one in TimbreClone.ino. It has to stay
+//  in step with the original, so the last test checks the page and item counts:
+//  change the original and forget this copy, and it fails.
 // ============================================================================
 #include "../../ui.h"
 #include <cstdio>
@@ -20,7 +22,7 @@ static void check(const char *what, bool ok, const char *detail = "") {
   if (!ok) gFail++;
 }
 
-// ---- 跟 TimbreClone.ino 同一份選單樹 ---------------------------------------
+// ---- the same menu tree as TimbreClone.ino ---------------------------------
 static int16_t gMicGain = 36;
 static int16_t gEpochs  = 300;
 
@@ -59,7 +61,7 @@ static const UiItem kTimbreItems[] = {
   { "Clear trainset", UI_CMD, 0, "z",   0,0,0, nullptr },
   { "Delete WAV files", UI_PAGE, PG_PURGE, nullptr, 0,0,0, nullptr },
 };
-// Cancel 放第一項：進來游標停在 0，手滑連按兩下確定只會取消
+// Cancel goes first: the cursor lands on 0, so a slipped double press of OK only cancels
 static const UiItem kPurgeItems[] = {
   { "Cancel",           UI_CMD, 0, "?back", 0,0,0, nullptr },
   { "DELETE rec+synth", UI_CMD, 0, "y y",   0,0,0, nullptr },
@@ -69,7 +71,7 @@ static const UiItem kTrainItems[] = {
   { "MLP on/off",   UI_CMD,    0, "k", 0,0,0, nullptr },
   { "Reload MODEL", UI_CMD,    0, "m", 0,0,0, nullptr },
 };
-// 跟本尊一樣用 sizeof 算，不手寫項目數
+// Computed with sizeof like the original, item counts never written by hand
 #define UI_PAGE_DEF(title, arr, parent) \
   { title, arr, (uint8_t)(sizeof(arr) / sizeof((arr)[0])), parent }
 
@@ -122,7 +124,7 @@ int main() {
   check("在根選單按返回不會出事", titleIs(u, "TimbreClone"));
 
   printf("\n3) 執行指令\n");
-  press(u, UI_KEY_OK);                       // 進 Play
+  press(u, UI_KEY_OK);                       // enter Play
   const char *c = press(u, UI_KEY_OK);       // Keyboard
   check("選 Keyboard 送出 \"?keys\"", c && strcmp(c, "?keys") == 0, c ? c : "(null)");
   press(u, UI_KEY_DOWN);
@@ -131,10 +133,10 @@ int main() {
   press(u, UI_KEY_DOWN);
   c = press(u, UI_KEY_OK);
   check("選 Scale 送出 \"p\"", c && strcmp(c, "p") == 0, c ? c : "(null)");
-  // 八度是數值項，要能來回調整並帶著值送出
+  // Octave is a value item: it has to adjust both ways and carry the value out with the command
   pressN(u, UI_KEY_DOWN, 3);                 // -> Key octave
   press(u, UI_KEY_OK);
-  pressN(u, UI_KEY_DOWN, 5);                 // 下限 -2
+  pressN(u, UI_KEY_DOWN, 5);                 // lower limit -2
   check("八度下限夾在 -2", gOctave == -2);
   pressN(u, UI_KEY_UP, 3);
   c = press(u, UI_KEY_OK);
@@ -164,7 +166,7 @@ int main() {
   c = press(u, UI_KEY_OK);
   check("離開編輯才送出，且帶著數值", c && strcmp(c, "g 42") == 0, c ? c : "(null)");
   check("離開後 editing() 為假", !u.editing());
-  // 編輯途中不該一直送指令，否則 micGain 會被洗版
+  // No commands should go out while editing, or micGain would flood the log
   press(u, UI_KEY_OK);
   check("再次進入編輯", u.editing());
   check("編輯中按上鍵不送指令", press(u, UI_KEY_UP) == nullptr);
@@ -173,10 +175,10 @@ int main() {
   check("返回鍵也能離開編輯並送出", c && strncmp(c, "g ", 2) == 0, c ? c : "(null)");
 
   printf("\n5) 捲動（項目多於 4 列時）\n");
-  press(u, UI_KEY_BACK);                     // 回根選單，游標停在 Sampling(1)
+  press(u, UI_KEY_BACK);                     // back to the root menu, cursor on Sampling(1)
   check("返回後游標回到 Sampling", u.cursor() == 1);
   press(u, UI_KEY_DOWN);                     // -> Timbre(2)
-  press(u, UI_KEY_OK);                       // Timbre，6 項
+  press(u, UI_KEY_OK);                       // Timbre, 6 items
   check("進到 Timbre 頁", titleIs(u, "Timbre"));
   check("一開始從第 0 列顯示", u.topRow() == 0);
   pressN(u, UI_KEY_DOWN, 3);
@@ -189,7 +191,7 @@ int main() {
   check("繞回第 0 項 -> 捲回頂端", u.topRow() == 0 && u.cursor() == 0);
 
   printf("\n5b) 刪檔確認頁（不可逆，手滑不能觸發）\n");
-  // Cancel 放第一項是這一頁唯一的保護機制，值得測。
+  // Cancel as the first item is this page's only safeguard, so it is worth testing.
   pressN(u, UI_KEY_DOWN, 5);                 // -> Delete WAV files
   check("游標移到 Delete WAV files", u.cursor() == 5);
   check("進入確認頁不會送出任何指令", press(u, UI_KEY_OK) == nullptr);
@@ -197,16 +199,17 @@ int main() {
   check("游標停在第 0 項（Cancel）", u.cursor() == 0);
   u.rowText(0, buf, sizeof(buf));
   check("第 0 項就是 Cancel", strcmp(buf, "Cancel") == 0, buf);
-  // 關鍵：從 Timbre 頁連按兩下確定，第二下必須落在 Cancel
+  // The key case: two OKs in a row from the Timbre page, the second must land on Cancel
   c = press(u, UI_KEY_OK);
   check("連按兩下確定只會取消，不會刪檔",
         c == nullptr || strcmp(c, "y y") != 0, c ? c : "(null)");
-  // "?back" 是選單內部指令，由 .ino 轉成一個返回鍵。這裡照樣模擬那一步，
-  // 否則測的就不是使用者實際會遇到的行為。
+  // "?back" is an internal menu command that the .ino turns into a BACK key. That
+  // step is simulated here too, otherwise the test would not be testing the
+  // behaviour a user actually meets.
   if (c && strcmp(c, "?back") == 0) press(u, UI_KEY_BACK);
   check("取消後回到 Timbre 頁", titleIs(u, "Timbre"));
-  // 真的要刪就得多按一次「下」再確定
-  press(u, UI_KEY_OK);                       // 再進確認頁
+  // Actually deleting takes one more DOWN and then OK
+  press(u, UI_KEY_OK);                       // enter the confirmation page again
   press(u, UI_KEY_DOWN);
   c = press(u, UI_KEY_OK);
   check("往下一項才是真正的刪除", c && strcmp(c, "y y") == 0, c ? c : "(null)");
@@ -223,7 +226,7 @@ int main() {
   const int nPages = sizeof(kPages) / sizeof(kPages[0]);
   bool ok = true;
   for (int i = 0; i < nPages; i++) {
-    // 每頁宣告的項目數要跟實際陣列長度相符 —— 對不上會讀到界外
+    // Each page's declared item count must match the real array length -- a mismatch reads out of bounds
     if (kPages[i].n == 0 || kPages[i].items == nullptr) ok = false;
     for (int j = 0; j < kPages[i].n; j++) {
       const UiItem &it = kPages[i].items[j];

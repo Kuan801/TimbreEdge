@@ -33,7 +33,7 @@ uint8_t Ui::rowCount() const {
   return _pages[_page].n;
 }
 
-// 讓游標永遠留在可視範圍內
+// Keep the cursor inside the visible window at all times
 void Ui::clampScroll() {
   if (_cursor < _top) _top = _cursor;
   if (_cursor >= _top + UI_VISIBLE_ROWS) _top = _cursor - (UI_VISIBLE_ROWS - 1);
@@ -50,11 +50,11 @@ void Ui::rowText(uint8_t row, char *out, size_t cap) const {
   const UiItem &it = p.items[row];
 
   if (it.kind == UI_ADJUST && it.value) {
-    // 編輯中的項目用 [ ] 框起來，一眼看得出上下鍵現在在改什麼
+    // Wrap the item being edited in [ ] so it is obvious what up/down is changing
     const bool ed = (_editing && row == _cursor);
     snprintf(out, cap, ed ? "%s [%d]" : "%s %d", it.label, (int)*it.value);
   } else if (it.kind == UI_PAGE) {
-    snprintf(out, cap, "%s", it.label);      // 子頁的箭頭交給繪製端畫
+    snprintf(out, cap, "%s", it.label);      // The submenu arrow is left to the drawing side
   } else {
     snprintf(out, cap, "%s", it.label);
   }
@@ -64,8 +64,9 @@ void Ui::rowText(uint8_t row, char *out, size_t cap) const {
 const char *Ui::feed(UiKey k) {
   if (!_pages || k == UI_KEY_NONE) return nullptr;
 
-  // 被狀態畫面佔用時（演奏中、採樣中…），只有 BACK 有作用：叫醒選單。
-  // 其餘按鍵讓給那個模式自己處理，避免「演奏到一半誤觸選單」。
+  // While a status screen owns the display (playing, sampling, ...), only BACK
+  // does anything: it wakes the menu. Every other key is left to that mode, so
+  // the menu cannot be opened by accident in the middle of a performance.
   if (_suspended) {
     if (k == UI_KEY_BACK) _suspended = false;
     return nullptr;
@@ -73,15 +74,16 @@ const char *Ui::feed(UiKey k) {
 
   const UiPage &p = _pages[_page];
 
-  // ---- 數值編輯模式 ------------------------------------------------------
+  // ---- value editing mode ------------------------------------------------
   if (_editing) {
     const UiItem *it = cur();
     if (!it || it->kind != UI_ADJUST || !it->value) { _editing = false; return nullptr; }
 
     if (k == UI_KEY_OK || k == UI_KEY_BACK) {
       _editing = false;
-      // 離開時才送指令：不要每按一下就送一次，否則像 micGain 這種會洗版，
-      // 而且中間的值本來就沒意義。
+      // Send the command only on exit: sending on every press would flood the
+      // log for something like micGain, and the intermediate values are
+      // meaningless anyway.
       snprintf(_cmdBuf, sizeof(_cmdBuf), it->cmd ? it->cmd : "", (int)*it->value);
       return _cmdBuf;
     }
@@ -94,7 +96,7 @@ const char *Ui::feed(UiKey k) {
     return nullptr;
   }
 
-  // ---- 一般導航 ----------------------------------------------------------
+  // ---- ordinary navigation -----------------------------------------------
   switch (k) {
     case UI_KEY_UP:
       if (p.n) _cursor = (_cursor == 0) ? (uint8_t)(p.n - 1) : (uint8_t)(_cursor - 1);

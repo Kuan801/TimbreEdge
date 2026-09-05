@@ -1,16 +1,20 @@
 // ============================================================================
-//  envdist.cpp  -  量「兩個音色的頻譜包絡差多少」
+//  envdist.cpp  -  measure "how far apart two timbres' spectral envelopes are"
 //
-//  用法：  ./envdist A.WAV B.WAV [C.WAV ...]
+//  Usage:  ./envdist A.WAV B.WAV [C.WAV ...]
 //
-//  為什麼需要它：ProfileBank::add() 要在「這個音色跟庫裡現有的差很多」時
-//  提出警告（多半代表換了樂器卻忘了先清空）。但門檻值不能用猜的 ——
-//  猜低了整天亂叫、猜高了等於沒有。
+//  Why it is needed: ProfileBank::add() has to warn when "this timbre is very
+//  different from what the bank already holds" (usually that means the
+//  instrument was swapped without clearing the bank first). But the threshold
+//  cannot be guessed -- too low and it cries wolf all day, too high and it may
+//  as well not be there.
 //
-//  這支工具印出所有素材的兩兩距離，讓門檻建立在實測分布上：
-//    同一把樂器、不同音高  -> 距離應該小（頻譜包絡本來就設計成與音高無關）
-//    不同樂器              -> 距離應該大
-//  兩堆分開得夠遠，中間才畫得出一條線。
+//  This tool prints the pairwise distance over all the material, so the
+//  threshold rests on a measured distribution:
+//    same instrument, different pitch  -> distance should be small (the envelope
+//                                         is pitch-independent by design)
+//    different instruments             -> distance should be large
+//  Only if the two piles are far enough apart can a line be drawn between them.
 // ============================================================================
 #include <Arduino.h>
 #include <Audio.h>
@@ -33,8 +37,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // SD 的模擬層會在路徑前面加一個根目錄。素材通常散在各處，
-  // 這裡直接把根設成 "/"，就可以在命令列給絕對路徑。
+  // The SD sim layer prepends a root directory to every path. Material is
+  // usually scattered around, so set the root to "/" and absolute paths work
+  // straight from the command line.
   extern std::string sim_sd_root;
   sim_sd_root = "";
 
@@ -55,7 +60,7 @@ int main(int argc, char **argv) {
   const int n = (int)ps.size();
   if (n < 2) { printf("素材不足\n"); return 1; }
 
-  // 樂器名稱 = 檔名第一個 '.' 之前那段（Trumpet.vib.ff.C4 -> Trumpet）
+  // Instrument name = the part before the first '.' (Trumpet.vib.ff.C4 -> Trumpet)
   std::vector<std::string> inst;
   for (int i = 0; i < n; i++) {
     size_t d = names[i].find('.');
@@ -65,14 +70,15 @@ int main(int argc, char **argv) {
   std::vector<float> same, diff;
   std::map<std::string, std::vector<float>> crossPair;
   std::map<std::string, std::vector<float>> selfPair;
-  // 最遠的同樂器配對要印出來 —— 數字大不一定是指標爛，也可能是素材有問題
-  // （多音檔混進來、錄壞的音）。不看是哪一對，就分不出這兩件事。
+  // Print the farthest same-instrument pair -- a big number need not mean the
+  // metric is bad, it can also mean bad material (a multi-note file slipped in,
+  // a botched take). Without seeing which pair it is, you cannot tell them apart.
   std::vector<std::pair<float, std::string>> worstSame;
 
   for (int i = 0; i < n; i++)
     for (int j = i + 1; j < n; j++) {
       const float d = profileTimbreDistance(ps[i], ps[j]);
-      if (d <= 0.0f) continue;                 // 重疊頻段不足，不列入統計
+      if (d <= 0.0f) continue;                 // too few overlapping bands, leave it out of the statistics
       if (inst[i] == inst[j]) {
         same.push_back(d);
         selfPair[inst[i]].push_back(d);
@@ -111,14 +117,17 @@ int main(int argc, char **argv) {
     printf("  %6.2f  %s\n", worstSame[i].first, worstSame[i].second.c_str());
 
   // -------------------------------------------------------------------------
-  //  留一法最近鄰
+  //  Leave-one-out nearest neighbour
   //
-  //  入庫時真正要問的不是「跟庫裡的平均差多少」，而是「跟庫裡『最像的那一組』
-  //  差多少」—— 因為合成時本來就是挑音高最接近的那一組來用。
+  //  What insertion really has to ask is not "how far from the bank's average"
+  //  but "how far from the closest set in the bank" -- synthesis picks the set
+  //  with the nearest pitch anyway.
   //
-  //  用平均會被鋼琴害慘：鋼琴同樂器內部距離最大到 15 dB，比「小號 vs 提琴」
-  //  還遠，任何絕對門檻都同時服務不了這四種樂器。但最近鄰不一樣：
-  //  鋼琴的每個音再怎麼變，總還有一個鄰居跟它像。
+  //  The average gets wrecked by the piano: its within-instrument distance
+  //  reaches 15 dB, farther than "trumpet vs violin", so no absolute threshold
+  //  can serve all four instruments at once. Nearest neighbour is different:
+  //  however much a piano note varies, it always still has a neighbour it
+  //  resembles.
   // -------------------------------------------------------------------------
   {
     std::vector<float> nnSame, nnCross;
@@ -150,16 +159,17 @@ int main(int argc, char **argv) {
   }
 
   // -------------------------------------------------------------------------
-  //  真實情境模擬：庫裡放滿 A 樂器，現在加進一個 B 樂器的音
+  //  Realistic scenario: the bank is full of instrument A, now add a note of B
   //
-  //  這才是 ProfileBank::add() 面對的問題。上面的「對所有其他樂器取最近」
-  //  是悲觀估計 —— 實務上庫裡只會有一種樂器。
+  //  This is the problem ProfileBank::add() actually faces. The "nearest over
+  //  all other instruments" above is a pessimistic estimate -- in practice the
+  //  bank only ever holds one instrument.
   // -------------------------------------------------------------------------
   {
     const float TH = 2.0f;
     std::vector<std::string> insts;
     for (auto &kv : selfPair) insts.push_back(kv.first);
-    // selfPair 只有出現過同樂器配對的；保險起見從 inst 重新收集
+    // selfPair only covers instruments that had a same-instrument pair; re-collect from inst to be safe
     insts.clear();
     for (int i = 0; i < n; i++)
       if (std::find(insts.begin(), insts.end(), inst[i]) == insts.end())
@@ -196,7 +206,7 @@ int main(int argc, char **argv) {
     printf("  對角線 = 誤報率（同樂器不該叫），其餘 = 偵測率（換樂器該叫）\n");
   }
 
-  // 門檻建議：同樂器要幾乎不誤報，跨樂器要盡量抓得到
+  // Suggested threshold: almost no false alarms within an instrument, catch as much cross-instrument as possible
   printf("\n=== 門檻掃描（用平均，供對照）===\n");
   printf("  門檻   同樂器誤報率   跨樂器偵測率\n");
   for (float th = 3.0f; th <= 9.01f; th += 0.5f) {

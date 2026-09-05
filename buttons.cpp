@@ -32,26 +32,26 @@ UiKey Buttons::poll() {
 
   for (int i = 0; i < 4; i++) {
     Btn &b = _b[i];
-    const bool raw = (digitalRead(b.pin) == LOW);      // 上拉，按下是 LOW
+    const bool raw = (digitalRead(b.pin) == LOW);      // Pull-up, so pressed is LOW
 
-    if (raw != b.raw) {                                // 原始狀態變了，重新計時
+    if (raw != b.raw) {                                // Raw state changed, restart the timer
       b.raw = raw;
       b.changed = now;
       continue;
     }
-    if ((now - b.changed) < TC_BTN_DEBOUNCE_MS) continue;   // 還沒穩定
+    if ((now - b.changed) < TC_BTN_DEBOUNCE_MS) continue;   // Not settled yet
 
-    if (raw && !b.stable) {                            // 剛按下 -> 事件
+    if (raw && !b.stable) {                            // Just pressed -> event
       b.stable  = true;
       b.downAt  = now;
       b.lastRep = now;
       return b.key;
     }
-    if (!raw && b.stable) {                            // 放開
+    if (!raw && b.stable) {                            // Released
       b.stable = false;
       continue;
     }
-    // 按住不放：上下鍵才連發
+    // Held down: only up/down auto-repeat
     if (raw && b.stable && b.repeats &&
         (now - b.downAt) > TC_BTN_REPEAT_DELAY_MS &&
         (now - b.lastRep) > TC_BTN_REPEAT_MS) {

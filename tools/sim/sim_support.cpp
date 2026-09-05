@@ -1,8 +1,9 @@
 // ============================================================================
-//  sim_support.cpp  -  桌機模擬器的平台膠水
+//  sim_support.cpp  -  platform glue for the desktop simulator
 //
-//  Serial / SD / SPI / AudioStream 的空殼實作。原本跟 main() 綁在
-//  sim_main.cpp 裡，抽出來之後 midi_test 這類額外的測試程式才連結得到。
+//  Stub implementations of Serial / SD / SPI / AudioStream. These used to live
+//  next to main() in sim_main.cpp; splitting them out is what lets extra test
+//  programs such as midi_test link against them.
 // ============================================================================
 #include "Arduino.h"
 #include "Audio.h"
@@ -11,7 +12,7 @@
 #include <string>
 #include <cstring>
 
-// ------------------------------------------------------- 全域模擬狀態 ------
+// ------------------------------------------------- global simulator state --
 uint64_t    sim_micros = 0;
 SimSerial   Serial;
 SDClass     SD;

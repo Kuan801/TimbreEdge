@@ -1,17 +1,19 @@
 // ============================================================================
-//  bank_test.cpp  -  音色庫的入庫規則與「換樂器」警告
+//  bank_test.cpp  -  the timbre bank's admission rules and the "instrument changed" warning
 //
-//  用法：  make bank_test && ./bank_test
+//  Usage:  make bank_test && ./bank_test
 //
-//  門檻值本身是用真實素材量出來的（見 config.h 的註解與 tools/sim/envdist），
-//  這裡驗的是「機制對不對」：
-//    - 同音高覆蓋、不同音高累加
-//    - 滿了之後拒收
-//    - 參考組數不足時不開口
-//    - 差很多才開口，像的時候要安靜
+//  The thresholds themselves were measured on real material (see the comments in
+//  config.h and tools/sim/envdist); what is verified here is that the mechanism is
+//  right:
+//    - same pitch overwrites, different pitch accumulates
+//    - refuse once full
+//    - stay quiet while there are not enough reference entries
+//    - speak up only on a big difference, stay silent when it is close
 //
-//  用合成的 profile 而不是真實 WAV，是為了讓這個測試不依賴素材檔案 ——
-//  素材放在使用者的桌面上，換一台電腦就跑不動了。
+//  Synthetic profiles rather than real WAVs, so this test does not depend on
+//  material files -- they live on the user's desktop, and on another machine it
+//  would not run at all.
 // ============================================================================
 #include "Arduino.h"
 #include "../../profile.h"
@@ -24,8 +26,8 @@ static void check(const char *what, bool ok) {
   if (!ok) gFail++;
 }
 
-// 造一個 profile。rolloff 決定頻譜包絡的斜率，decay/inharm/shimmer 是
-// 真正把樂器分開的那幾項（實測：鋼琴 0.35/2.3e-4/0.00，管樂 0.96/2e-5/0.04~0.10）
+// Build a profile. rolloff sets the slope of the spectral envelope; decay/inharm/shimmer
+// are the ones that really separate instruments (measured: piano 0.35/2.3e-4/0.00, winds 0.96/2e-5/0.04~0.10)
 static InstrumentProfile mk(float f0, float rolloff, float decay,
                             float inharm, float shimmer, float bright) {
   InstrumentProfile p{};
@@ -47,9 +49,9 @@ static InstrumentProfile mk(float f0, float rolloff, float decay,
   return p;
 }
 
-// 「同一把管樂器的不同音高」
+// "different pitches of the same wind instrument"
 static InstrumentProfile wind(float f0)  { return mk(f0, 6.0f, 0.96f, 2.0e-5f, 0.05f, 4.0f); }
-// 「鋼琴」：衰減快、非諧性高、幾乎沒有 shimmer
+// "piano": fast decay, high inharmonicity, almost no shimmer
 static InstrumentProfile piano(float f0) { return mk(f0, 9.0f, 0.35f, 2.3e-4f, 0.00f, 2.2f); }
 
 int main() {
@@ -62,8 +64,8 @@ int main() {
     check("加入第一組後 n=1", b.n == 1);
     b.add(wind(293.7f));                       // D4
     check("不同音高會累加，n=2", b.n == 2);
-    InstrumentProfile again = wind(262.5f);    // 跟 C4 差不到半音
-    again.brightness = 9.9f;                   // 做個記號，確認真的換掉了
+    InstrumentProfile again = wind(262.5f);    // less than a semitone from C4
+    again.brightness = 9.9f;                   // A marker, to confirm it really was replaced
     b.add(again);
     check("半音以內視為同一個音，n 不變", b.n == 2);
     bool replaced = false;
@@ -73,16 +75,20 @@ int main() {
 
   printf("\n2) 滿了之後：只換掉冗餘的，不會無腦踢最舊的\n");
   {
-    // 這一節原本斷言「滿了就回 false」。那個契約已經改了 ——
-    // 拒收看起來安全，實際上是把結果交給檔名排序決定：32 個小號素材
-    // 留下的是依字母排的 16 個，E3~G3 整段沒有素材，那批音的諧波 LSD
-    // 量到 12~14 dB。取捨邏輯本身在 evict_test 有完整測試，
-    // 這裡只守住「不變量」：容量不能被撐破、端點不能消失。
-    // 間距要在「半音」上均勻，不是在 Hz 上均勻。
+    // This section used to assert "return false once full". That contract has
+    // changed -- refusing looks safe, but it really hands the outcome to filename
+    // sorting: of 32 trumpet samples the 16 kept were the alphabetically first ones,
+    // all of E3~G3 had no material at all, and those notes measured 12~14 dB
+    // harmonic LSD. The eviction logic itself is tested thoroughly in evict_test;
+    // what is guarded here is only the invariants: capacity must not be blown, the
+    // endpoints must not disappear.
+    // Spacing has to be even in *semitones*, not even in Hz.
     //
-    // 第一版寫成 200 + i*40 Hz，測試立刻抓到問題：那在對數音高上一點都不均勻
-    // （200->240 是 3.16 個半音，760->800 只有 0.89 個），所以再塞一個低音區的
-    // 音高進來確實會讓分佈更平均，程式判斷「值得換」是對的，錯的是我的前提。
+    // The first version used 200 + i*40 Hz and the test caught it immediately: that
+    // is not remotely even in log pitch (200->240 is 3.16 semitones, 760->800 only
+    // 0.89), so slipping in another pitch down in the low register really did make
+    // the distribution more even -- the code was right to judge it "worth swapping",
+    // it was my premise that was wrong.
     ProfileBank b;
     for (int i = 0; i < TC_MAX_PROFILES; i++)
       b.add(wind(200.0f * powf(2.0f, i / 12.0f)));
@@ -90,12 +96,12 @@ int main() {
 
     const float loF0 = b.p[0].f0;
     const float hiF0 = b.p[TC_MAX_PROFILES - 1].f0;
-    // 已經半音均勻了，再塞一個範圍內的音高只會讓某一段變成 2 個半音 -> 拒收
+    // Already even in semitones: another pitch inside the range would only leave one stretch at 2 semitones -> refused
     const bool ok = b.add(wind(200.0f * powf(2.0f, 0.5f / 12.0f)));
     check("範圍內、無助於分佈的音高仍然拒收", !ok);
     check("n 永遠不超過 TC_MAX_PROFILES", b.n == TC_MAX_PROFILES);
 
-    // 擴大音域的音高要收，但端點不能被犧牲
+    // A pitch that widens the range must be taken, but not at the cost of an endpoint
     b.add(wind(3000.0f));
     check("擴大音域之後 n 仍然是上限", b.n == TC_MAX_PROFILES);
     bool loKept = false, hiKept = false, newIn = false;
@@ -111,12 +117,13 @@ int main() {
 
   printf("\n3) 換樂器警告：參考組數不足時不開口\n");
   {
-    // 實測只有 1 組當參考時誤報率 9.64%，3 組才降到 1.07%。
-    // 寧可少講話 —— 每次入庫都跳警告，看兩次就開始無視了。
+    // Measured: with only 1 reference entry the false alarm rate is 9.64%, and it
+    // takes 3 to get down to 1.07%. Better to say less -- a warning on every
+    // admission gets ignored after the second sighting.
     ProfileBank b;
     for (int i = 0; i < TC_TIMBRE_WARN_MIN_REFS - 1; i++)
       b.add(wind(261.6f + i * 40.0f));
-    b.add(piano(392.0f));                      // 明顯是別的樂器
+    b.add(piano(392.0f));                      // clearly a different instrument
     check("庫裡不足 3 組時，再怎麼不像也不出聲", !b.lastAddSuspect);
   }
 
@@ -148,7 +155,7 @@ int main() {
     b.clear();
     check("clear 之後 n 歸零", b.n == 0);
     check("clear 之後警告狀態也歸零", !b.lastAddSuspect && b.lastAddDist == 0.0f);
-    // 清空後重新開始，前幾個音不該還掛著上一輪的警告
+    // After a clear and a fresh start, the first few notes must not still be carrying the previous run's warning
     b.add(piano(261.6f));
     check("清空後加入第一個音不出聲", !b.lastAddSuspect);
   }

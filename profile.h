@@ -1,6 +1,7 @@
 // ============================================================================
-//  profile.h  -  一個「樂器音色指紋」的資料結構
-//  分析器產生它、模型消費它、也可以存成 SD 上的 PROFILE.BIN
+//  profile.h  -  the data structure for one "instrument timbre fingerprint"
+//  Produced by the analyzer, consumed by the model, and storable as PROFILE.BIN
+//  on the SD card
 // ============================================================================
 #pragma once
 
@@ -10,98 +11,116 @@
 struct InstrumentProfile {
   uint32_t magic;            // TC_PROFILE_MAGIC
 
-  float f0;                  // 分析到的參考基頻 (Hz)
-  float noteDur;             // 有效音長 (秒，從 onset 到尾巴)
+  float f0;                  // Reference fundamental as analyzed (Hz)
+  float noteDur;             // Effective note length (seconds, from onset to tail)
 
-  // --- 振幅包絡 (ADSR 擬合值，播放時用) ---
-  float attack;              // 秒
-  float decay;               // 秒
+  // --- amplitude envelope (fitted ADSR values, used during playback) ---
+  float attack;              // seconds
+  float decay;               // seconds
   float sustain;             // 0..1
-  float release;             // 秒
-  // 持續段每秒的自然衰減倍率：1.0 = 完全不掉(管風琴/弦樂長音)，
-  // 0.5 = 每秒掉一半(鋼琴/撥弦)。只在 sustain 視窗內量測，不含 release。
+  float release;             // seconds
+  // Natural decay factor per second during sustain: 1.0 = no decay at all (organ /
+  // sustained strings), 0.5 = halves every second (piano / plucked). Measured only
+  // inside the sustain window, release excluded.
   float sustainDecayPerSec;
 
-  // --- 音色 ---
-  // keyframe[k][h] = 第 k 個時間點、第 h 個諧波的相對振幅 (已正規化，總和=1)
+  // --- timbre ---
+  // keyframe[k][h] = relative amplitude of harmonic h at time point k
+  // (normalized, sums to 1)
   float keyframe[TC_N_KEYFRAME][TC_N_HARM];
-  // loud[k] = 第 k 個時間點的整體響度 (0..1)
+  // loud[k] = overall loudness at time point k (0..1)
   //
-  // ★ 這條曲線就是合成時實際使用的振幅包絡，不再走參數化 ADSR。
-  //   原因：鋼琴是「雙段衰減」(prompt sound + aftersound)，實測前 0.3 秒
-  //   衰減 0.026/秒、0.8 秒後只剩 0.70/秒，差了 27 倍。用單一指數擬合會得到
-  //   0.475/秒 —— 對卡農那種 0.45~1.8 秒的音符來說慢了將近 20 倍，
-  //   每個音都拖成管風琴一樣的長音。直接播量測到的曲線就沒有這個問題，
-  //   而且提琴的漸強、管樂的起音全都自動正確。
+  // ★ This curve is the amplitude envelope actually used during synthesis; the
+  //   parametric ADSR is no longer used.
+  //   Why: a piano has a two-stage decay (prompt sound + aftersound). Measured,
+  //   the first 0.3 s decays at 0.026/s and after 0.8 s only 0.70/s remains -- a
+  //   factor of 27. Fitting a single exponential gives 0.475/s, which for the
+  //   0.45~1.8 s notes in the canon is almost 20 times too slow, so every note
+  //   drags on like an organ. Playing back the measured curve directly avoids
+  //   that, and it also gets the violin's crescendo and the wind attack right for
+  //   free.
   float loud[TC_N_KEYFRAME];
 
-  // 包絡該在哪個（扭曲時間軸上的）位置停住不再往下走。
-  //   衰減型 -> 1.0，整條曲線都要走完，衰減本身就是樂器的聲音
-  //   持續型 -> 本體結束的位置，之後保持不變，不能把「收弓」演成自動消音
+  // Where (on the warped time axis) the envelope should stop falling.
+  //   decaying   -> 1.0, run the whole curve; the decay is the instrument's sound
+  //   sustaining -> the end of the body, held flat after that, so that "lifting the
+  //                 bow" is not performed as an automatic fade-out
   float envHoldNorm;
 
-  // --- 頻譜包絡 (共振峰)，log 頻率 50Hz..16kHz 均分 TC_SPECENV_PTS 點，單位 dB ---
-  // 移調時用它做 formant 保留：換音高不換音色。
+  // --- spectral envelope (formants), TC_SPECENV_PTS points evenly spaced on a log
+  //     frequency axis from 50 Hz to 16 kHz, in dB ---
+  // Used for formant preservation under transposition: change the pitch, not the
+  // timbre.
   float specEnv[TC_SPECENV_PTS];
 
-  float noiseGain;           // 持續段的非諧波(氣聲/弓噪)能量比例 0..1
-  float inharmonicity;       // B 係數，弦樂器 > 0，用來微調諧波頻率
-  float brightness;          // 頻譜質心 / f0，除錯用
+  float noiseGain;           // Aperiodic (breath / bow noise) energy fraction during sustain, 0..1
+  float inharmonicity;       // Coefficient B, > 0 for stringed instruments; fine-tunes harmonic frequencies
+  float brightness;          // Spectral centroid / f0, for debugging
 
-  // --- 真實度三要素（都是從素材量測出來的，不是猜的）---
+  // --- the three realism ingredients (all measured from the source, not guessed) ---
 
-  // 非同步起音：每根諧波抵達自身 50% 峰值的時刻，相對於基頻的延遲（秒）。
-  // 真實樂器的高次諧波通常晚幾十毫秒才進來，全部同時起音會非常「電子」。
+  // Asynchronous onset: the moment each harmonic reaches 50% of its own peak,
+  // relative to the fundamental (seconds). On real instruments the upper harmonics
+  // usually arrive tens of milliseconds late; starting them all together sounds
+  // extremely electronic.
   float harmOnset[TC_N_HARM];
 
-  // 逐根諧波在持續段的微觀起伏深度（標準差/平均，去除整體衰減後）。
-  // 真實樂器約 5~10%，完全沒有的話長音聽起來像管風琴。
+  // Per-harmonic micro-fluctuation depth during sustain (std/mean, with the overall
+  // decay removed). Real instruments are around 5~10%; with none at all, sustained
+  // notes sound like an organ.
   float shimmerDepth;
 
-  // 起音前 30 ms 的噪聲比例。弓噪／氣聲／擊弦雜音集中在這裡，
-  // 通常遠高於持續段的 noiseGain。
+  // Noise fraction in the 30 ms before the onset. Bow noise, breath noise and
+  // string-strike noise concentrate here, usually far above the sustain noiseGain.
   float attackNoise;
 
-  // 從素材量到的顫音深度（cents）。提琴/人聲/管樂會有，鋼琴/吉他幾乎是 0。
-  // 早期版本對所有樂器一律加 6 cents 的顫音 —— 鋼琴帶顫音物理上不可能，
-  // 而且那個統一的擺動會讓每一種樂器都染上同樣的「合成器味」。
+  // Vibrato depth measured from the source (cents). Violin / voice / winds have it;
+  // piano and guitar are essentially 0. Early versions added a flat 6 cents of
+  // vibrato to everything -- a vibrating piano is physically impossible, and that
+  // uniform wobble gave every instrument the same "synthesizer" tint.
   float vibratoCents;
-  float vibratoHz;           // 量測到的顫音頻率（無顫音時為 0）
-  float noiseHighFrac;       // 持續段殘差在 5*f0 以上的比例（氣聲 vs 弓噪的落點）
-  float attackHighFrac;      // 起音殘差在 5*f0 以上的比例（槌擊聲 vs 吹氣聲的落點）
+  float vibratoHz;           // Measured vibrato rate (0 when there is no vibrato)
+  float noiseHighFrac;       // Fraction of the sustain residual above 5*f0 (where breath noise vs bow noise sits)
+  float attackHighFrac;      // Fraction of the attack residual above 5*f0 (where hammer noise vs breath noise sits)
 
   bool  valid;
 };
 
 // ============================================================================
-//  ProfileBank  -  一把樂器的多個取樣點
+//  ProfileBank  -  several sample points for one instrument
 //
-//  只留一組 profile 的話，整個音域都得靠「移調 + 頻譜包絡校正」硬撐。
-//  真實鋼琴每個音區的音色差很多（低音弦多、高音只有一根、擊弦點比例也不同），
-//  移調兩個八度出來的東西一定不像。
+//  With only one profile, the entire range has to be carried by "transposition +
+//  spectral envelope correction". A real piano's timbre differs a lot between
+//  registers (multiple strings in the bass, a single string up top, a different
+//  strike-point ratio), so two octaves of transposition will never sound right.
 //
-//  有 12 個素材就存 12 組，每個音符挑最接近的那組來用，移調距離縮到半音，
-//  誤差幾乎歸零。16 組約佔 75 KB DMAMEM。
+//  With 12 source recordings, 12 profiles are stored and each note uses the
+//  closest one, shrinking the transposition distance to a semitone and taking the
+//  error close to zero. 16 profiles occupy about 75 KB of DMAMEM.
 // ============================================================================
 #define TC_MAX_PROFILES 16
 
 struct ProfileBank {
   InstrumentProfile p[TC_MAX_PROFILES];
-  // 最近一次 add() 有沒有覺得「這好像不是同一把樂器」。
-  // 面板要看得到 —— 採樣時使用者手上拿著樂器盯著 OLED，不會在看序列埠。
+  // Whether the last add() suspected "this may not be the same instrument".
+  // The panel has to show it -- while sampling, the user is holding an instrument
+  // and watching the OLED, not the serial monitor.
   bool  lastAddSuspect = false;
   float lastAddDist    = 0.0f;
   int n = 0;
 
   void clear() { n = 0; lastAddSuspect = false; lastAddDist = 0.0f; }
-  bool add(const InstrumentProfile &np);        // 同音高會覆蓋
-  void checkTimbreMismatch(const InstrumentProfile &np);   // add() 內部會呼叫
-  int  nearest(float f0) const;                 // 找最接近的，空的回 -1
+  bool add(const InstrumentProfile &np);        // The same pitch overwrites
+  void checkTimbreMismatch(const InstrumentProfile &np);   // Called internally by add()
+  int  nearest(float f0) const;                 // Find the closest one; returns -1 when empty
 
-  // 庫滿了要犧牲誰。回傳該被換掉的索引，或 -1 代表「新的這組不值得換」。
+  // Who to sacrifice when the bank is full. Returns the index to be replaced, or
+  // -1 meaning "the new one is not worth the swap".
   //
-  // 拉成公開介面純粹是為了測試：這是純粹的取捨邏輯（只看音高，不碰音訊），
-  // 桌機驗得完，而它一旦錯了是無聲的 —— 只會讓某個音區沒有素材可用。
+  // Public purely for testing: this is pure selection logic (it looks only at
+  // pitch, never at audio), so it can be verified completely on a desktop -- and
+  // when it goes wrong it fails silently, simply leaving some register with no
+  // source material.
   int  evictionTarget(float newF0) const;
   const InstrumentProfile *get(float f0) const;
   void summary() const;
@@ -114,23 +133,30 @@ bool  profileSave(const InstrumentProfile &p, const char *path);
 bool  profileLoad(InstrumentProfile &p, const char *path);
 void  profilePrint(const InstrumentProfile &p);
 
-// 在 log 頻率軸上內插頻譜包絡，回傳線性增益 (非 dB)
+// Interpolate the spectral envelope on the log frequency axis; returns linear gain
+// (not dB)
 float specEnvGain(const InstrumentProfile &p, float hz);
 
-// 兩個音色的頻譜包絡差多少（dB，RMS）。
+// How far apart two timbres' spectral envelopes are (dB, RMS).
 //
-// 頻譜包絡刻意設計成與音高無關（它描述的是共振腔，不是被吹/彈的那個音），
-// 所以同一把樂器的不同音高應該很接近，換一把樂器才會拉開。
-// 用途：入庫時偵測「換了樂器卻忘了先清空」。
+// The spectral envelope is deliberately designed to be pitch-independent (it
+// describes the resonating body, not the note being blown or plucked), so
+// different pitches of the same instrument should be close together and only a
+// different instrument should pull them apart.
+// Use: detect "the instrument was changed but the bank was not cleared first".
 //
-// 只比「形狀」不比絕對高度：兩邊各自扣掉自己的平均值再算差。
-// 錄音音量不同不該被當成音色不同。
+// Only the shape is compared, not the absolute level: each side has its own mean
+// subtracted before the difference. A different recording level should not count
+// as a different timbre.
 float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b);
 
-// 綜合音色距離（無單位，1.0 ≈ 同樂器不同音高的典型差異）。
+// Combined timbre distance (dimensionless, 1.0 ≈ the typical difference between
+// two pitches of the same instrument).
 //
-// 頻譜包絡單獨用不夠：實測鋼琴同樂器內部的包絡距離最大到 15 dB，比
-// 「小號 vs 提琴」還遠 —— 因為鋼琴每個音的琴弦與擊槌都不一樣。
-// 但鋼琴在「衰減速度」「非諧性」「shimmer」這三項上跟持續音樂器差得非常開，
-// 合起來看才分得出「換了樂器」和「同一把樂器的不同音」。
+// The spectral envelope alone is not enough: measured, the envelope distance
+// *within* one piano reaches 15 dB, further apart than "trumpet vs violin" --
+// because every piano note has different strings and hammers. But the piano is
+// very far from sustaining instruments on decay rate, inharmonicity and shimmer,
+// and only taking all of them together separates "the instrument changed" from
+// "a different note on the same instrument".
 float profileTimbreDistance(const InstrumentProfile &a, const InstrumentProfile &b);

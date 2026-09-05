@@ -1,14 +1,16 @@
 // ============================================================================
-//  trigger_test  -  連續採樣觸發判斷的狀態機測試
+//  trigger_test  -  state machine test for the continuous-sampling trigger
 //
-//  這個測試是為了一個實際回報的症狀寫的：「沒有播放聲音的狀況下會連續不斷
-//  地收音」。那個 bug 在真機上要坐在旁邊等好幾分鐘才看得到，而且看到了也
-//  不知道是門檻的問題還是重新武裝的問題 —— 在桌機上餵合成訊號，兩秒跑完
-//  全部路徑，而且分得出來是哪一條。
+//  This test was written for an actually reported symptom: "it keeps recording
+//  continuously even when nothing is being played". On the real hardware that
+//  bug takes several minutes of sitting next to the box to see, and even once
+//  you see it you cannot tell whether it is the threshold or the re-arming —
+//  on the desktop you feed it synthetic signal, every path runs in two seconds,
+//  and it tells you which one.
 //
-//  背景噪音的數字全部來自使用者實際錄到的 12 個檔（每個取最安靜的 0.3 秒，
-//  共 1236 個 block）：中位 0.0207、99% 0.0281、最大 0.0301。
-//  最弱的那個音 block 峰值中位 0.0529。
+//  All the background-noise numbers come from 12 files the user actually
+//  recorded (the quietest 0.3 s of each, 1236 blocks in total): median 0.0207,
+//  99% 0.0281, max 0.0301. The weakest note has a median block peak of 0.0529.
 // ============================================================================
 #include "../../trigger.h"
 
@@ -22,27 +24,29 @@ static void check(const char *name, bool ok, const char *note = "") {
   if (!ok) gFail++;
 }
 
-// 一個 block = 128 取樣 @44.1 kHz = 2.902 ms。時間用整數毫秒累加會失真，
-// 所以用浮點累加再取整 —— 不然 400 ms 的門檻會差到十幾個 block。
+// One block = 128 samples @44.1 kHz = 2.902 ms. Accumulating the time in integer
+// milliseconds drifts, so accumulate in float and round — otherwise the 400 ms
+// threshold is off by a dozen blocks or more.
 struct Clock {
   double ms = 0;
   uint32_t tick() { ms += 128.0 / 44.1; return (uint32_t)ms; }
 };
 
-// 可重現的偽亂數，不要用 rand()（各平台實作不同，測試就不可重現了）
+// Reproducible PRNG — don't use rand() (the implementation differs per platform,
+// which would make the test irreproducible)
 static uint32_t gSeed = 12345;
 static float urand() {
   gSeed = gSeed * 1103515245u + 12345u;
   return (float)((gSeed >> 16) & 0x7FFF) / 32767.0f;
 }
 
-// 背景噪音的 block 峰值：中位 0.021、最大 0.030。
-// 用「中位 + 隨機起伏」逼近實測的波峰因數 1.46。
+// Background noise block peaks: median 0.021, max 0.030.
+// "Median + random fluctuation" approximates the measured crest factor of 1.46.
 static float noiseBlock(float scale = 1.0f) {
   return scale * (0.0175f + 0.0130f * urand());
 }
 
-// 餵 N 毫秒的訊號，回傳這段期間觸發了幾次
+// Feed N milliseconds of signal, return how many times it triggered during it
 static int feedFor(TriggerGate &g, Clock &c, double ms, float (*gen)(float), float scale) {
   int n = 0;
   const double until = c.ms + ms;
@@ -54,8 +58,8 @@ static int feedFor(TriggerGate &g, Clock &c, double ms, float (*gen)(float), flo
 }
 
 static float genNoise(float s) { return noiseBlock(s); }
-static float genSilent(float s) { (void)s; return 0.0008f; }   // 幾乎沒訊號
-static float genNote(float s)  { return s; }                   // 穩定的音
+static float genSilent(float s) { (void)s; return 0.0008f; }   // almost no signal
+static float genNote(float s)  { return s; }                   // a steady note
 
 int main() {
   printf("\n連續採樣的觸發判斷\n");
@@ -63,8 +67,9 @@ int main() {
   // -------------------------------------------------------------------------
   printf("\n1) 回報的症狀：沒有人演奏，只有背景噪音\n");
   {
-    // 把背景放大到 1.4 倍（0.025~0.042），也就是「峰值會超過原本固定門檻
-    // 0.035」的那種房間 —— 這正是會整晚亂錄的情況。
+    // Scale the background up 1.4x (0.025~0.042), i.e. the kind of room whose
+    // peaks exceed the old fixed 0.035 threshold — exactly the case that records
+    // junk all night long.
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     const int n = feedFor(g, c, 30000.0, genNoise, 1.4f);
@@ -75,8 +80,9 @@ int main() {
     check("門檻確實被環境抬高了", g.threshold() > 0.035f);
   }
   {
-    // 背景剛好卡在「高於半個門檻、低於門檻」的死角 —— 舊版就是在這裡
-    // 永遠武裝、一有風吹草動就錄。
+    // Background sitting right in the dead zone, above half the threshold but
+    // below the threshold — this is where the old version stayed armed forever
+    // and recorded at the slightest draught.
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, 5000.0, genNoise, 1.0f);
@@ -89,8 +95,8 @@ int main() {
   {
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
-    feedFor(g, c, 1500.0, genNoise, 1.0f);          // 校正 + 武裝
-    const int n = feedFor(g, c, 300.0, genNote, 0.0529f);   // 實測最弱的那個音
+    feedFor(g, c, 1500.0, genNoise, 1.0f);          // calibrate + arm
+    const int n = feedFor(g, c, 300.0, genNote, 0.0529f);   // the weakest note actually measured
     char msg[80];
     snprintf(msg, sizeof(msg), "(環境 %.4f，門檻 %.4f，音 0.0529)",
              g.ambient(), g.threshold());
@@ -110,31 +116,33 @@ int main() {
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, 1500.0, genSilent, 1.0f);
-    int n = feedFor(g, c, 100.0, genNote, 0.30f);        // 起音
-    g.noteRecorded(c.tick());                            // 錄完 2 秒
-    n += feedFor(g, c, 1200.0, genNote, 0.08f);          // 還在響的尾巴
+    int n = feedFor(g, c, 100.0, genNote, 0.30f);        // attack
+    g.noteRecorded(c.tick());                            // 2 s of recording done
+    n += feedFor(g, c, 1200.0, genNote, 0.08f);          // tail still sounding
     check("錄完之後尾巴不會再觸發一次", n == 1);
   }
   {
-    // 但是安靜下來之後，下一個音要能觸發 —— 不然採樣模式只能收一個音
+    // But once it goes quiet the next note has to trigger — otherwise sampling
+    // mode only ever captures one note
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, 1500.0, genSilent, 1.0f);
     feedFor(g, c, 100.0, genNote, 0.30f);
     g.noteRecorded(c.tick());
-    feedFor(g, c, 800.0, genSilent, 1.0f);               // 停半秒以上
+    feedFor(g, c, 800.0, genSilent, 1.0f);               // silence for over half a second
     check("安靜之後下一個音收得到",
           feedFor(g, c, 200.0, genNote, 0.30f) == 1);
   }
   {
-    // 錄完之後「馬上」又出現一個音（沒有停頓）不該收 ——
-    // 那多半是同一個音，或是使用者彈太快，兩者都不該當成新素材
+    // A note appearing immediately after a recording (with no gap) must not be
+    // captured — it is most likely the same note, or the user playing too fast,
+    // and neither should count as new material
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, 1500.0, genSilent, 1.0f);
     feedFor(g, c, 100.0, genNote, 0.30f);
     g.noteRecorded(c.tick());
-    feedFor(g, c, 100.0, genSilent, 1.0f);               // 只停 100 ms
+    feedFor(g, c, 100.0, genSilent, 1.0f);               // only 100 ms of silence
     check("只停 100 ms 不足以重新武裝（要 400 ms）",
           feedFor(g, c, 200.0, genNote, 0.30f) == 0);
   }
@@ -152,14 +160,16 @@ int main() {
     check("校正期過了就結束", !g.calibrating());
   }
   {
-    // 校正期間一直很吵 -> 不該直接武裝，那不是「觀察到的安靜」
+    // Noisy throughout the calibration -> must not arm straight away, that is not
+    // "observed silence"
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, TC_TRIG_CAL_MS + 30.0, genNote, 0.5f);
     check("校正期間很吵的話不會立刻武裝", !g.armedReady());
   }
   {
-    // 校正期間很安靜 -> 不用再多等 400 ms，直接可以收
+    // Quiet throughout the calibration -> no need to wait another 400 ms, ready
+    // to record right away
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, TC_TRIG_CAL_MS + 30.0, genSilent, 1.0f);
@@ -183,18 +193,18 @@ int main() {
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, 1500.0, genNoise, 1.0f);
-    const int n = feedFor(g, c, 200.0, genNote, 0.21f);   // 約為環境的 10 倍
+    const int n = feedFor(g, c, 200.0, genNote, 0.21f);   // roughly 10x the ambient level
     const float hr = g.lastHeadroomDb();
     char msg[48]; snprintf(msg, sizeof(msg), "(觸發 %d 次，%.1f dB)", n, hr);
-    // 一定要先確認真的觸發了 —— 沒觸發的話 lastHeadroomDb() 回 0，
-    // 「小於 12 dB」那條測試就會用錯誤的理由通過
+    // Confirm it really did trigger first — with no trigger lastHeadroomDb()
+    // returns 0 and the "less than 12 dB" test would pass for the wrong reason
     check("餘裕約 20 dB", n >= 1 && hr > 16.0f && hr < 24.0f, msg);
   }
   {
     TriggerGate g; Clock c;
     g.arm(0.035f, c.tick());
     feedFor(g, c, 1500.0, genNoise, 1.0f);
-    const int n = feedFor(g, c, 200.0, genNote, 0.053f);   // 使用者實際的情況
+    const int n = feedFor(g, c, 200.0, genNote, 0.053f);   // the user's actual situation
     const float hr = g.lastHeadroomDb();
     char msg[72]; snprintf(msg, sizeof(msg), "(觸發 %d 次，%.1f dB，提醒門檻 %.1f dB)",
                            n, hr, TC_TRIG_MIN_HEADROOM_DB);
@@ -213,8 +223,9 @@ int main() {
   // -------------------------------------------------------------------------
   printf("\n7) 負對照：把安全機制拆掉的話，測試必須要失敗\n");
   {
-    // 直接模擬舊版的邏輯，確認上面第 1 節那個測試真的有鑑別力 ——
-    // 不然「通過」可能只是因為測試根本沒踩到那條路。
+    // Simulate the old logic directly, to confirm the test in section 1 above
+    // really does discriminate — otherwise "pass" might only mean the test never
+    // went down that path.
     uint32_t quietSince = 0, now = 0; int hot = 0, trig = 0;
     Clock c; gSeed = 999;
     const float thresh = 0.035f;
@@ -233,14 +244,16 @@ int main() {
   // ---------------------------------------------------------------------
   printf("\n8) 校正期撞到孤立尖峰（實機回報的症狀）\n");
   {
-    // 實機紀錄：安靜時交流 RMS 只有 0.001，但輸入偶爾會有孤立的數位尖峰
-    // 到 0.28。校正的 600 ms 撞上一個，環境就被量成 0.2767、門檻 0.415，
-    // 之後怎麼彈都不會觸發，而畫面只會說「等待中… 電平 0.06 / 門檻 0.41」。
+    // From the hardware log: when quiet the AC RMS is only 0.001, but the input
+    // occasionally shows isolated digital spikes up to 0.28. If the 600 ms
+    // calibration hits one, ambient is measured as 0.2767 and the threshold as
+    // 0.415; after that nothing you play will trigger, and all the screen says is
+    // "waiting… level 0.06 / threshold 0.41".
     TriggerGate g; Clock c; gSeed = 4242;
     g.arm(TC_TRIG_LEVEL, (uint32_t)c.ms);
     int n = 0;
     while (g.calibrating()) {
-      // 每 80 個 block 插一個尖峰，600 ms 內大約 2~3 個
+      // one spike every 80 blocks, roughly 2~3 within 600 ms
       const float pk = (++n % 80 == 0) ? 0.28f : noiseBlock(1.0f);
       g.feed(pk, c.tick());
     }
@@ -250,8 +263,9 @@ int main() {
     check("尖峰不會把環境估到訊號等級", g.ambient() < 0.08f, msg);
     check("門檻仍然在可以觸發的範圍", g.threshold() < 0.12f, msg);
 
-    // 正對照：這樣的門檻底下，正常力度的音還是要觸發得到
-    feedFor(g, c, 600, genSilent, 1.0f);            // 先安靜一段把武裝湊滿
+    // Positive control: under a threshold like that, a normally played note must
+    // still trigger
+    feedFor(g, c, 600, genSilent, 1.0f);            // a quiet stretch first, to complete the arming
     const int trig = feedFor(g, c, 300, genNote, 0.20f);
     snprintf(msg, sizeof(msg), "(觸發 %d 次)", trig);
     check("修好之後 0.20 的音觸發得到", trig >= 1, msg);
@@ -259,8 +273,9 @@ int main() {
 
   printf("\n9) 負對照：環境改用最大值的話，同一段訊號會壞掉\n");
   {
-    // 沒有這一段的話，第 8 節「通過」有可能只是因為那些尖峰根本沒被餵進去。
-    // 這裡直接重現舊的估計方式：校正期間取最大值。
+    // Without this, section 8 "passing" could just be because those spikes never
+    // got fed in at all. This reproduces the old estimator directly: take the
+    // maximum over the calibration window.
     Clock c; gSeed = 4242;
     float ambMax = 0.0f;
     int n = 0;
@@ -280,14 +295,16 @@ int main() {
   // ---------------------------------------------------------------------
   printf("\n10) block 電平：單根脈衝不該被當成有人在彈\n");
   {
-    // 實機數據：安靜時 block RMS 只有 0.002，卻有 4~8%% 的 block 帶著一根
-    // 0.19~0.28 的針（數位耦合）。用最大值看，這種 block 跟真的樂音沒兩樣。
-    // TC_BLOCK 會展開成 AUDIO_BLOCK_SAMPLES（Audio.h 的東西），這支測試
-    // 刻意不依賴 Arduino 的標頭，所以這裡自己寫死 128。
+    // Hardware data: when quiet the block RMS is only 0.002, yet 4~8%% of blocks
+    // carry a single 0.19~0.28 needle (digital coupling). Judged by the maximum,
+    // such a block is indistinguishable from a real note.
+    // TC_BLOCK expands to AUDIO_BLOCK_SAMPLES (an Audio.h thing), and this test
+    // deliberately does not depend on the Arduino headers, so 128 is hard-coded
+    // here.
     const int BLK = 128;
     int16_t blk[BLK];
 
-    // (a) 純樂音（440 Hz，振幅 0.20）
+    // (a) pure tone (440 Hz, amplitude 0.20)
     for (int i = 0; i < BLK; i++)
       blk[i] = (int16_t)(0.20f * 32767.0f * sinf(2.0f * (float)M_PI * 440.0f * i / 44100.0f));
     const float lvlTone = tcBlockLevel(blk, BLK);
@@ -295,21 +312,21 @@ int main() {
     snprintf(msg, sizeof(msg), "(量到 %.4f，實際振幅 0.20)", lvlTone);
     check("純樂音的電平幾乎等於振幅", lvlTone > 0.19f && lvlTone <= 0.201f, msg);
 
-    // (b) 安靜 + 一根 0.28 的針
+    // (b) quiet + a single 0.28 needle
     for (int i = 0; i < BLK; i++) blk[i] = (int16_t)(0.002f * 32767.0f * urand());
     blk[37] = (int16_t)(0.28f * 32767.0f);
     const float lvlSpike = tcBlockLevel(blk, BLK);
     snprintf(msg, sizeof(msg), "(針是 0.28，量到 %.4f)", lvlSpike);
     check("單根脈衝被剔除，電平回到底噪", lvlSpike < 0.01f, msg);
 
-    // (c) 三根針也還是要擋掉（TC_BLOCK_TOPK = 4）
+    // (c) three needles must still be rejected (TC_BLOCK_TOPK = 4)
     blk[60] = (int16_t)(0.25f * 32767.0f);
     blk[95] = (int16_t)(0.31f * 32767.0f);
     const float lvl3 = tcBlockLevel(blk, BLK);
     snprintf(msg, sizeof(msg), "(三根針，量到 %.4f)", lvl3);
     check("三根針也擋得住", lvl3 < 0.01f, msg);
 
-    // (d) 樂音 + 針：電平仍由樂音決定，不會被針抬高
+    // (d) tone + needles: the level is still set by the tone, not lifted by them
     for (int i = 0; i < BLK; i++)
       blk[i] = (int16_t)(0.20f * 32767.0f * sinf(2.0f * (float)M_PI * 440.0f * i / 44100.0f));
     blk[11] = (int16_t)(0.90f * 32767.0f);
@@ -317,7 +334,7 @@ int main() {
     snprintf(msg, sizeof(msg), "(樂音 0.20 + 0.90 的針 -> %.4f)", lvlBoth);
     check("有針也不會把樂音的電平灌高", lvlBoth < 0.25f, msg);
 
-    // 負對照：取最大值的話，(b) 那個 block 看起來就像 0.28 的訊號
+    // Negative control: taking the maximum, block (b) looks like a 0.28 signal
     float mx = 0.0f;
     for (int i = 0; i < BLK; i++) blk[i] = (int16_t)(0.002f * 32767.0f * urand());
     blk[37] = (int16_t)(0.28f * 32767.0f);

@@ -1,12 +1,13 @@
 // ============================================================================
 //  tools/sim/sim_main.cpp
 //
-//  桌機模擬器：用「跟 Teensy 上一模一樣的」analyzer / timbre_model /
-//  additive_synth / score / player 程式碼，把卡農算成一個 WAV 檔。
-//  燒錄前先在電腦上聽一次，比反覆插拔 SD 卡快太多。
+//  Desktop simulator: renders the canon to a WAV file using exactly the same
+//  analyzer / timbre_model / additive_synth / score / player sources that run on
+//  the Teensy. Listening on a computer before flashing is far quicker than
+//  swapping the SD card back and forth.
 //
-//  編譯與執行：
-//     cd TimbreClone/tools/sim && make && ./sim <素材.wav> [MODEL.BIN] [out.wav]
+//  Build and run:
+//     cd TimbreClone/tools/sim && make && ./sim <source.wav> [MODEL.BIN] [out.wav]
 // ============================================================================
 
 #include "Arduino.h"
@@ -25,7 +26,7 @@
 #include <string>
 #include <vector>
 
-// ------------------------------------------------------------ WAV 輸出 ----
+// ----------------------------------------------------------- WAV output ----
 static void writeWav(const char *path, const std::vector<int16_t> &pcm, int ch, int sr) {
   FILE *f = fopen(path, "wb");
   if (!f) { printf("無法寫入 %s\n", path); return; }
@@ -44,9 +45,10 @@ static void writeWav(const char *path, const std::vector<int16_t> &pcm, int ch, 
 }
 
 // ---------------------------------------------------------------------------
-//  train 模式：跑「跟 Teensy 上完全同一份」的訓練程式碼
+//  train mode: run exactly the same training code as on the Teensy
 //     ./sim train MODEL.BIN note1.wav note2.wav ...
-//  用來在燒錄前確認機上訓練會收斂到什麼程度，比在序列埠上等快得多。
+//  Used to confirm before flashing how far on-device training will converge,
+//  much faster than waiting on the serial port.
 // ---------------------------------------------------------------------------
 static MlpWeights gOutW;
 static ProfileBank gBank;
@@ -87,10 +89,10 @@ static int runTrain(int argc, char **argv) {
 int main(int argc, char **argv) {
   if (argc > 1 && strcmp(argv[1], "train") == 0) return runTrain(argc, argv);
 
-  // 用法：./sim out.wav model.bin note1.wav [note2.wav ...]
-  //   多個素材會全部進音色庫，每個音符挑最接近的那組。
+  // Usage: ./sim out.wav model.bin note1.wav [note2.wav ...]
+  //   Every source goes into the timbre bank and each note picks the closest one.
 
-  // 命令列給的是真實路徑，不要再套 SD 模擬的根目錄前綴
+  // The command line gives real paths; do not prepend the simulated SD root
   { extern std::string sim_sd_root; sim_sd_root = ""; }
 
   const char *out   = argv[1];
@@ -118,11 +120,14 @@ int main(int argc, char **argv) {
 
   printf("\n=== 3) 演奏半音階 ===\n");
 
-  // 音域跟韌體一樣：音色庫實際涵蓋的範圍，再往上一個八度。
+  // Same range rule as the firmware: the range the bank actually covers, plus one
+  // octave.
   //
-  // 以前這裡沒做，於是模擬器永遠演奏寫死的 C3~B4。素材若是 C4~B4，
-  // 模擬器就會把每個音往下移調一個八度來演奏 —— 那是韌體不會做的事，
-  // 拿模擬器的結果去代表機器的表現就會失真（而且是往壞的方向失真）。
+  // This used to be missing, so the simulator always played a hard-coded C3~B4.
+  // With C4~B4 source material the simulator would transpose every note down an
+  // octave -- something the firmware never does -- and taking the simulator's
+  // result as representative of the hardware then distorts it, in the pessimistic
+  // direction.
   {
     int lo = 127, hi = 0;
     for (int i = 0; i < gBank.n; i++) {
@@ -132,13 +137,13 @@ int main(int argc, char **argv) {
     }
     if (lo <= hi) {
       scoreSetScaleRange(lo, hi + 12);
-      player.load();                       // 音域改了要重新產生樂譜
+      player.load();                       // Changing the range means the score has to be regenerated
     }
   }
 
   synth.setModel(&modelObj);
   synth.setMasterGain(0.18f);
-  synth.setVibrato(50.0f, 4.8f);   // 上限與預設速率；實際深度/頻率都由 profile 量測決定
+  synth.setVibrato(50.0f, 4.8f);   // Cap and default rate; the actual depth/frequency come from the measured profile
   player.begin(&synth);
   player.start(TC_BPM);
 
@@ -149,7 +154,7 @@ int main(int argc, char **argv) {
   float peak = 0.0f;
   double rmsAcc = 0.0;
 
-  while (blocks < 60 * 344) {                 // 上限 60 秒，保險
+  while (blocks < 60 * 344) {                 // 60 s cap, as a safety net
     sim_micros += blockUs;
     player.service();
 
@@ -167,7 +172,7 @@ int main(int argc, char **argv) {
     blocks++;
 
     if (!player.playing()) {
-      if (synth.activeVoices() == 0 && ++tailBlocks > 172) break;   // 尾音放完再等 0.5 秒
+      if (synth.activeVoices() == 0 && ++tailBlocks > 172) break;   // Wait another 0.5 s after the tail has rung out
     }
   }
 

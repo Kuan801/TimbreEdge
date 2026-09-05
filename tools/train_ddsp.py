@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 # =============================================================================
-#  train_ddsp.py  -  幫 TimbreClone 訓練那顆小 MLP，輸出 MODEL.BIN
+#  train_ddsp.py  -  trains TimbreClone's little MLP and writes MODEL.BIN
 #
-#  依賴：只需要 numpy。（WAV 用標準庫 wave 讀，反向傳播自己手刻）
+#  Dependencies: numpy only. (WAV read with the stdlib wave module, backprop hand-rolled.)
 #
-#  用法
+#  Usage
 #  -----
-#    # 最常見：直接餵幾個單音 WAV（同一把樂器、不同音高越多越好）
+#    # The common case: just feed it a few monophonic WAVs (same instrument, the more pitches the better)
 #    python3 train_ddsp.py violin_a3.wav violin_c5.wav violin_e4.wav -o MODEL.BIN
 #
-#    # 或吃 Teensy 上按 'c' 匯出的逐格分析檔
+#    # Or take the per-frame analysis file exported by pressing 'c' on the Teensy
 #    python3 train_ddsp.py --csv FRAMES.CSV -o MODEL.BIN
 #
-#  把 MODEL.BIN 複製到 SD 卡根目錄，Teensy 開機就會自動載入。
+#  Copy MODEL.BIN to the root of the SD card and the Teensy loads it automatically at boot.
 #
-#  模型
+#  Model
 #  -----
-#    輸入 4：[ log2(f0/261.63)/PITCH_SCALE , 響度 , 起音後正規化時間 , 是否放開 ]
+#    4 inputs: [ log2(f0/261.63)/PITCH_SCALE , loudness , normalized time since attack , released ]
 #    32 -> 32 (tanh) -> 33
-#    前 32 個 logits 走 softmax = 諧波分佈；第 33 個走 sigmoid = 噪聲比
-#    損失 = 交叉熵(諧波分佈) + 0.3 * BCE(噪聲)
+#    the first 32 logits go through softmax = partial distribution; the 33rd through sigmoid = noise ratio
+#    loss = cross-entropy(partial distribution) + 0.3 * BCE(noise)
 #
-#  為什麼可以這麼小？
-#    音高造成的「共振峰位移」已經在 Teensy 端用頻譜包絡處理掉了，
-#    MLP 只需要學「響度 / 時間 / 音區」造成的音色變化，這部分低維且平滑。
+#  Why can it be this small?
+#    The formant shift caused by pitch is already dealt with on the Teensy side by the
+#    spectral envelope, so the MLP only has to learn the timbre changes caused by
+#    loudness / time / register, and those are low-dimensional and smooth.
 # =============================================================================
 
 import argparse
@@ -33,31 +34,31 @@ import wave
 
 import numpy as np
 
-# ----------------------------------------------------------------- 參數 -----
+# --------------------------------------------------------------- Params -----
 SR        = 44100
 NFFT      = 2048
 HOP       = 512
-N_HARM    = 32                  # 要跟 config.h 的 TC_N_HARM 一致
+N_HARM    = 32                  # Must match TC_N_HARM in config.h
 MLP_IN    = 4
 MLP_H1    = 32
 MLP_H2    = 32
 MLP_OUT   = N_HARM + 1
-MAGIC     = 0x324D4C50          # 要跟 config.h 的 TC_MLP_MAGIC 一致
-PITCH_SCALE = 1.0               # 要跟 config.h 的 TC_MLP_PITCH_SCALE 一致
+MAGIC     = 0x324D4C50          # Must match TC_MLP_MAGIC in config.h
+PITCH_SCALE = 1.0               # Must match TC_MLP_PITCH_SCALE in config.h
 F0_MIN    = 65.0
 F0_MAX    = 1500.0
-TIME_WARP_TAU = 0.06            # 要跟 config.h 的 TC_TIME_WARP_TAU 一致
+TIME_WARP_TAU = 0.06            # Must match TC_TIME_WARP_TAU in config.h
 
 
 def time_warp(t, note_dur):
-    """對數時間軸。起音只有幾十毫秒卻要和數秒的持續段共用關鍵影格，
-    線性分配會讓起音完全沒被建模。必須與 config.h 的 tc_timeWarp 完全一致。"""
+    """Log time axis. The attack lasts only tens of ms yet has to share keyframes with seconds
+    of sustain; a linear split leaves it completely unmodelled. Must match config.h's tc_timeWarp exactly."""
     note_dur = max(note_dur, 1e-3)
     k = 1.0 / TIME_WARP_TAU
     return np.log1p(k * np.maximum(t, 0.0)) / np.log1p(k * note_dur)
 
 
-# ============================================================== WAV 讀取 =====
+# ============================================================== WAV read =====
 def read_wav(path):
     with wave.open(path, "rb") as w:
         nch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
@@ -67,7 +68,7 @@ def read_wav(path):
     x = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32768.0
     if nch > 1:
         x = x.reshape(-1, nch).mean(axis=1)
-    if sr != SR:                                   # 線性重取樣就夠用
+    if sr != SR:                                   # Linear resampling is good enough
         t_old = np.arange(len(x)) / sr
         t_new = np.arange(0, t_old[-1], 1.0 / SR)
         x = np.interp(t_new, t_old, x)
@@ -76,7 +77,7 @@ def read_wav(path):
 
 # ================================================================ YIN ========
 def yin_f0(frame, sr=SR, thresh=0.15):
-    """對一段 NFFT 長的訊號估基頻，用 FFT 加速差分函數。"""
+    """Estimate f0 over an NFFT-long frame, using an FFT to speed up the difference function."""
     W = len(frame) // 2
     tau_max = min(int(sr / F0_MIN), W - 1)
     tau_min = max(int(sr / F0_MAX), 2)
@@ -114,7 +115,7 @@ def yin_f0(frame, sr=SR, thresh=0.15):
         if dn[tau] > 0.6:
             return 0.0
 
-    if 0 < tau < tau_max - 1:                      # 拋物線內插
+    if 0 < tau < tau_max - 1:                      # Parabolic interpolation
         a, b, c = dn[tau - 1], dn[tau], dn[tau + 1]
         den = 2 * (2 * b - a - c)
         if abs(den) > 1e-12:
@@ -122,9 +123,9 @@ def yin_f0(frame, sr=SR, thresh=0.15):
     return sr / tau
 
 
-# =========================================================== 逐格分析 ========
+# ===================================================== Frame analysis ========
 def analyze_file(path, verbose=True):
-    """回傳 (X, Yh, Yn)：輸入特徵、諧波分佈目標、噪聲目標。"""
+    """Returns (X, Yh, Yn): input features, partial-distribution targets, noise targets."""
     x = read_wav(path)
     if len(x) < NFFT * 2:
         raise ValueError(f"{path}: 太短")
@@ -132,7 +133,7 @@ def analyze_file(path, verbose=True):
     win = np.hanning(NFFT)
     n_frames = (len(x) - NFFT) // HOP + 1
 
-    # --- RMS 包絡 / onset / offset ---
+    # --- RMS envelope / onset / offset ---
     rms = np.array([np.sqrt(np.mean(x[i * HOP:i * HOP + HOP] ** 2)) for i in range(n_frames)])
     if rms.max() < 1e-4:
         raise ValueError(f"{path}: 幾乎是靜音")
@@ -144,7 +145,7 @@ def analyze_file(path, verbose=True):
     if offset - onset < 6:
         raise ValueError(f"{path}: 有效音長太短")
 
-    # --- 基頻（取中位數）---
+    # --- f0 (take the median) ---
     peak = onset + int(np.argmax(rms[onset:offset + 1]))
     cands = []
     for k in range(9):
@@ -159,7 +160,7 @@ def analyze_file(path, verbose=True):
     f0 = float(np.median(cands))
 
     dur = (offset - onset) * HOP / SR
-    rel_start = onset + int((offset - onset) * 0.80)     # 尾段當作 release
+    rel_start = onset + int((offset - onset) * 0.80)     # Treat the tail as release
 
     X, Yh, Yn = [], [], []
     bin_hz = SR / NFFT
@@ -208,7 +209,7 @@ def analyze_file(path, verbose=True):
 
 
 def load_csv(path, verbose=True):
-    """吃 Teensy 匯出的 FRAMES.CSV：t,f0,loud,h1..h16,noise"""
+    """Reads the FRAMES.CSV exported by the Teensy: t,f0,loud,h1..h16,noise"""
     rows = np.genfromtxt(path, delimiter=",", skip_header=1)
     if rows.ndim == 1:
         rows = rows[None, :]
@@ -269,7 +270,7 @@ def train(X, Yh, Yn, epochs=4000, lr=3e-3, lam=0.3, seed=0, verbose=True):
         ph = softmax(z3[:, :N_HARM])
         pn = 1.0 / (1.0 + np.exp(-z3[:, N_HARM]))
 
-        # 梯度：softmax+CE 與 sigmoid+BCE 的 logit 梯度都很乾淨
+        # Gradients: the logit gradients of softmax+CE and sigmoid+BCE are both clean
         dz3 = np.zeros_like(z3)
         dz3[:, :N_HARM] = (ph - yhb) / batch
         dz3[:, N_HARM] = lam * (pn - ynb) / batch
@@ -297,9 +298,9 @@ def train(X, Yh, Yn, epochs=4000, lr=3e-3, lam=0.3, seed=0, verbose=True):
     return p
 
 
-# ============================================================== 匯出 =========
+# ============================================================ Export =========
 def export(p, path):
-    """必須完全對齊 timbre_model.h 的 MlpWeights 記憶體佈局。"""
+    """Must line up exactly with the MlpWeights memory layout in timbre_model.h."""
     with open(path, "wb") as f:
         f.write(struct.pack("<I", MAGIC))
         for key, shape in (("w1", (MLP_H1, MLP_IN)), ("b1", (MLP_H1,)),
@@ -359,7 +360,7 @@ def main():
     print("\n開始訓練：")
     p = train(X, Yh, Yn, epochs=args.epochs, lr=args.lr, seed=args.seed)
 
-    # 抽樣看看模型學成什麼樣
+    # Sample a few points to see what the model has learned
     print("\n訓練後的諧波分佈抽樣（起音 / 中段 / 尾段）：")
     for tn, label in ((0.05, "起音"), (0.50, "中段"), (0.95, "尾段")):
         probe = np.array([[float(np.median(X[:, 0])), 0.8, tn, 1.0 if tn > 0.8 else 0.0]])

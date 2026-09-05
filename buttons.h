@@ -1,18 +1,21 @@
 // ============================================================================
-//  buttons.h  -  4 顆輕觸開關的去彈跳與邊緣偵測
+//  buttons.h  -  debouncing and edge detection for the 4 tactile switches
 //
-//  跟 ui.h 分開的理由：這裡是唯一碰硬體的部分（digitalRead / millis），
-//  ui.cpp 是純狀態機。分開之後選單邏輯在桌機測得到。
+//  Why this is separate from ui.h: this is the only part that touches hardware
+//  (digitalRead / millis), while ui.cpp is a pure state machine. Split that
+//  way, the menu logic is testable on the desktop.
 //
-//  接法：按鈕一腳接 Teensy 腳位，另一腳接 GND。用 INPUT_PULLUP，
-//  所以不用外接電阻，按下去讀到 LOW。
+//  Wiring: one leg of the button to a Teensy pin, the other to GND. With
+//  INPUT_PULLUP no external resistor is needed, and a press reads LOW.
 //
-//  去彈跳用「狀態穩定 TC_BTN_DEBOUNCE_MS 才承認」的作法，而不是按下就
-//  delay()。輕觸開關的彈跳通常 1~5 ms，接觸不良的會更久；用 delay 會把
-//  audio 的 loop 卡住，而這支程式的 loop 還要餵 USB Host 和 SD 寫入。
+//  Debouncing works by "only accept a state once it has held for
+//  TC_BTN_DEBOUNCE_MS" rather than delay() on every press. Tactile switches
+//  usually bounce for 1~5 ms, longer with a poor contact; a delay would stall
+//  the audio loop, and this program's loop also has to feed USB Host and the
+//  SD writes.
 //
-//  上下鍵有自動連發（按住 400 ms 後每 120 ms 一次），調 micGain 這種
-//  0~63 的值時才不用按 63 下。
+//  Up/down auto-repeat (every 120 ms after being held for 400 ms) so that
+//  setting a 0~63 value like micGain does not take 63 presses.
 // ============================================================================
 #pragma once
 
@@ -24,22 +27,22 @@ class Buttons {
 public:
   void begin();
 
-  // 在 loop() 裡呼叫。回傳這一輪產生的按鍵事件（一次一個），沒有就 UI_KEY_NONE。
+  // Call from loop(). Returns this round's key event (one at a time), else UI_KEY_NONE.
   UiKey poll();
 
-  // 有沒有任何一顆正被按著（開機自檢用得到）
+  // Is any button currently held down (used by the power-on self test)
   bool anyDown() const;
 
 private:
   struct Btn {
     uint8_t  pin;
     UiKey    key;
-    bool     stable   = false;   // 去彈跳之後的狀態，true = 按下
+    bool     stable   = false;   // Debounced state, true = pressed
     bool     raw      = false;
-    uint32_t changed  = 0;       // raw 最後一次改變的時間
-    uint32_t downAt   = 0;       // stable 變成按下的時間
-    uint32_t lastRep  = 0;       // 最後一次連發的時間
-    bool     repeats  = false;   // 這顆要不要連發
+    uint32_t changed  = 0;       // When raw last changed
+    uint32_t downAt   = 0;       // When stable became pressed
+    uint32_t lastRep  = 0;       // Time of the last auto-repeat
+    bool     repeats  = false;   // Whether this button auto-repeats
   };
   Btn _b[4];
 };

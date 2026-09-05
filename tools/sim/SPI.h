@@ -1,3 +1,3 @@
-// tools/sim/SPI.h  -  空殼
+// tools/sim/SPI.h  -  empty shim
 #pragma once
 #include "Audio.h"

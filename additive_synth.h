@@ -1,12 +1,12 @@
 // ============================================================================
-//  additive_synth.h  -  自訂 AudioStream：TC_N_VOICES 複音的加法合成器
+//  additive_synth.h  -  custom AudioStream: TC_N_VOICES-voice additive synth
 //
-//  每個聲音 = 16 個正弦諧波 + 1 層濾波噪聲 + ADSR 包絡
-//  諧波振幅每個 block (2.9 ms) 由 TimbreModel 更新一次，block 內線性斜坡，
-//  所以聽起來是連續變化而不是階梯。
+//  Each voice = 16 sine partials + 1 filtered noise layer + ADSR envelope
+//  Partial amplitudes are updated once per block (2.9 ms) by TimbreModel and ramped
+//  linearly within the block, so it sounds like a continuous change, not a staircase.
 //
-//  CPU 估算：16 諧波 × 128 取樣 × 6 複音 = 12288 次查表內插 / block
-//            ≈ 0.12 M cycles / 2.9 ms，Teensy 4.1 (600 MHz) 約 7% CPU。
+//  CPU estimate: 16 partials × 128 samples × 6 voices = 12288 table interpolations / block
+//                ≈ 0.12 M cycles / 2.9 ms, about 7% CPU on a Teensy 4.1 (600 MHz).
 // ============================================================================
 #pragma once
 
@@ -21,26 +21,26 @@ public:
 
   void setModel(TimbreModel *m) { _model = m; }
   void setMasterGain(float g)   { _gain = tc_clampf(g, 0.0f, 1.0f); }
-  // 顫音深度由 profile 決定（鋼琴量到 0 就不加）。這裡設的是「上限」與速率，
-  // cents < 0 代表完全交給 profile。
+  // Vibrato depth comes from the profile (measured 0 on piano, so none is added). What is set
+  // here is the upper limit and the rate; cents < 0 means leave it entirely to the profile.
   void setVibrato(float maxCents, float hz) { _vibMaxCents = maxCents; _vibHz = hz; }
 
-  // 彎音輪：以半音為單位（Keystation 的 <PB / PB> 按鍵）。
-  // 對已經在發聲的音也會即時生效，所以是全域倍率而不是 noteOn 時算死。
+  // Pitch bend wheel, in semitones (the Keystation's <PB / PB> buttons).
+  // Applies to already-sounding notes too, so it's a global multiplier, not fixed at noteOn.
   void setPitchBend(float semitones) {
     _bendMul = powf(2.0f, tc_clampf(semitones, -24.0f, 24.0f) / 12.0f);
   }
-  // 調變輪：在 profile 量到的顫音之上「額外」加的深度（cents）。
-  // 用加的而不是取代，這樣鋼琴（量到 0）按 MOD 也會有反應。
+  // Mod wheel: depth (in cents) added *on top of* the vibrato measured in the profile.
+  // Added rather than substituted, so MOD still does something on piano (which measured 0).
   void setModDepth(float cents) { _modCents = tc_clampf(cents, 0.0f, 100.0f); }
 
-  // noteOn 的結果。以前是 void，任何一種失敗都是「安靜地什麼都不做」——
-  // 鍵盤按了沒聲音時完全查不出原因，所以改成回報。
+  // Result of noteOn. It used to be void, so every kind of failure was "silently do nothing" --
+  // when a key made no sound there was no way to find out why, hence the reported result.
   enum NoteResult : uint8_t {
     NOTE_OK = 0,
-    NOTE_NO_MODEL,      // 還沒 setModel()
-    NOTE_NO_TIMBRE,     // 沒有載入任何音色（SD 上沒有 BANK.BIN / PROFILE.BIN）
-    NOTE_NO_VOICE       // 聲部全滿而且搶不到
+    NOTE_NO_MODEL,      // setModel() not called yet
+    NOTE_NO_TIMBRE,     // No timbre loaded (no BANK.BIN / PROFILE.BIN on the SD card)
+    NOTE_NO_VOICE       // All voices busy and none could be stolen
   };
   NoteResult noteOn(float midi, float vel = 1.0f, float pan = 0.5f);
 
@@ -52,7 +52,7 @@ public:
   virtual void update(void);
 
 private:
-  // 包絡直接照著 profile 量到的曲線走，所以只需要兩個狀態。
+  // The envelope just follows the curve measured in the profile, so two states are enough.
   enum Stage : uint8_t { IDLE = 0, PLAYING, RELEASE };
 
   struct Voice {
@@ -65,54 +65,54 @@ private:
     float    tSec  = 0.0f;
     uint32_t age   = 0;
 
-    int      nPart = TC_N_HARM;          // 這個音高實際要發幾根（依 f0 自動決定）
+    int      nPart = TC_N_HARM;          // How many partials this pitch actually runs (decided automatically from f0)
     uint32_t phase[TC_N_PARTIAL];
     uint32_t baseInc[TC_N_PARTIAL];
     float    amp[TC_N_PARTIAL];
     float    ampStep[TC_N_PARTIAL];
 
-    // 非同步起音：每根諧波自己的進場時刻（秒）與閘門狀態
+    // Asynchronous attack: each partial's own entry time (seconds) and gate state
     float    onsetT[TC_N_PARTIAL];
-    // shimmer：每根諧波獨立的慢速擺動
+    // shimmer: an independent slow wobble per partial
     float    shimPhase[TC_N_PARTIAL];
     float    shimInc[TC_N_PARTIAL];
     float    shimDepth = 0.0f;
 
     float    noise = 0.0f, noiseStep = 0.0f;
-    // 噪聲帶通：TC_NOISE_LP_STAGES 級 biquad 低通 + 一級 biquad 高通。
-    // 不用一階遞迴串接 —— 轉角一高它就退化成 y = x，等於沒有低通。
+    // Noise band-pass: TC_NOISE_LP_STAGES biquad low-pass stages + one biquad high-pass.
+    // Not cascaded one-pole recursions -- once the corner is high they degenerate to y = x, i.e. no low-pass at all.
     float    nbLpB[3] = {1.0f, 0.0f, 0.0f}, nbLpA[2] = {0.0f, 0.0f};
     float    nbHpB[3] = {1.0f, 0.0f, 0.0f}, nbHpA[2] = {0.0f, 0.0f};
     float    nbLpZ[TC_NOISE_LP_STAGES][2] = {{0.0f, 0.0f}};
     float    nbHpZ[2] = {0.0f, 0.0f};
-    float    noiseNrm = 1.0f;      // noteOn 時實測出來的濾波器 RMS 補償
-    float    noiseFLo = 0.0f, noiseFHi = 0.0f;   // 實際用的帶通上下緣（除錯用）
-    float    jitterSigma = 0.0f;   // 諧波幅度抖動的標準差
-    float    jitFrac = 0.9f;       // 非週期能量中走「抖動」的比例
-    float    atkJitVar = 0.0f, atkJitSigma = 0.0f;   // 起音期間額外的抖動
+    float    noiseNrm = 1.0f;      // Filter RMS compensation, measured at noteOn
+    float    noiseFLo = 0.0f, noiseFHi = 0.0f;   // Band-pass edges actually used (for debugging)
+    float    jitterSigma = 0.0f;   // Standard deviation of the partial amplitude jitter
+    float    jitFrac = 0.9f;       // Fraction of the aperiodic energy that goes through the jitter
+    float    atkJitVar = 0.0f, atkJitSigma = 0.0f;   // Extra jitter during the attack
     float    jit[TC_N_PARTIAL] = {0};
-    float    noiseAtk = 0.0f;            // 起音噪聲爆點的額外增益
+    float    noiseAtk = 0.0f;            // Extra gain for the attack noise burst
     uint32_t rng   = 0x13579BDFu;
 
     float    vibPhase = 0.0f;
     float    vibCents = 0.0f;
-    float    vibHz    = 4.8f;      // 顫音速率（來自 profile）
+    float    vibHz    = 4.8f;      // Vibrato rate (from the profile)
 
-    // 由 profile 帶進來的包絡參數
-    float    rCoef  = 0.999f;      // 放開後的衰減（每 block）
-    float    refDur = 1.0f;        // 素材的音長，用來換算扭曲時間軸
-    float    holdNorm = 1.0f;      // 包絡走到這裡就不再往下
-    // 量到的包絡曲線走完之後，每個 block 還要再乘上多少。
+    // Envelope parameters carried in from the profile
+    float    rCoef  = 0.999f;      // Decay after release (per block)
+    float    refDur = 1.0f;        // Length of the source material, used to convert the warped time axis
+    float    holdNorm = 1.0f;      // The envelope stops falling here
+    // How much to keep multiplying by per block once the measured envelope curve runs out.
     //
-    // 衰減型（鋼琴/吉他/撥弦）取自 profile 的 sustainDecayPerSec；
-    // 持續型是 1.0，也就是維持不變（運弓/吹氣還在繼續）。
+    // Decaying instruments (piano/guitar/plucked) take it from the profile's sustainDecayPerSec;
+    // sustaining ones use 1.0, i.e. hold steady (the bow/breath is still going).
     //
-    // 沒有這個東西的話，音會停在 loud[31] 的高度不再往下 —— 實測鋼琴的
-    // loud[] 只掉到 -24 dB 就結束，於是每個音都在 -24 dB 平住，
-    // 聽起來像管風琴。素材錄得越短越明顯（音長 1.79 s 的錄音，
-    // 卡農的二分音符還沒放開就已經走完包絡了）。
+    // Without this the note freezes at the height of loud[31] and never falls further --
+    // measured piano loud[] only drops to -24 dB before it ends, so every note sat flat at
+    // -24 dB and sounded like an organ. The shorter the recording the more obvious it is (with
+    // a 1.79 s sample, the canon's half notes finish the envelope before they are even released).
     float    tailCoef = 1.0f;
-    float    envTail  = 0.0f;      // 曲線走完之後的包絡值；0 = 還沒進入尾段
+    float    envTail  = 0.0f;      // Envelope value after the curve runs out; 0 = not into the tail yet
     const InstrumentProfile *prof = nullptr;
   };
 

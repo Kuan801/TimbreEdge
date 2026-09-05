@@ -5,15 +5,17 @@
 //  ProfileBank
 // ============================================================================
 // ---------------------------------------------------------------------------
-//  入庫前的「這好像不是同一把樂器」檢查
+//  The "this doesn't look like the same instrument" check, run before storing
 //
-//  比的是「跟庫裡最像的那一組」差多少，不是平均 —— 合成時本來就是挑音高
-//  最接近的那一組來用，而且用平均會被鋼琴害慘（鋼琴同樂器內部差異比
-//  「小號 vs 提琴」還大，因為每個音的琴弦與擊槌都不同）。
+//  We compare against "the closest entry in the bank", not the average ——
+//  synthesis already picks the entry with the nearest pitch, and averaging gets
+//  wrecked by the piano (a piano's spread within one instrument is wider than
+//  "trumpet vs violin", since every note has its own string and hammer).
 //
-//  庫裡少於 TC_TIMBRE_WARN_MIN_REFS 組就不開口：實測只有 1 組當參考時
-//  誤報率 9.64%，3 組降到 1.07%。寧可少講話也不要變成雜訊 ——
-//  每次入庫都跳警告，看兩次就開始無視了。
+//  Say nothing while the bank holds fewer than TC_TIMBRE_WARN_MIN_REFS entries:
+//  measured false-positive rate is 9.64% with only 1 reference, 1.07% with 3.
+//  Better to say too little than to turn into noise ——
+//  a warning on every store gets ignored after the second time.
 // ---------------------------------------------------------------------------
 void ProfileBank::checkTimbreMismatch(const InstrumentProfile &np) {
   lastAddSuspect = false;
@@ -25,7 +27,7 @@ void ProfileBank::checkTimbreMismatch(const InstrumentProfile &np) {
     const float d = profileTimbreDistance(np, p[i]);
     if (d > 0.0f && d < best) best = d;
   }
-  if (best > 1e8f) return;              // 沒得比（重疊頻段不足）
+  if (best > 1e8f) return;              // Nothing to compare against (too little overlapping band)
 
   lastAddDist = best;
   if (best < TC_TIMBRE_WARN_DIST) return;
@@ -45,7 +47,7 @@ bool ProfileBank::add(const InstrumentProfile &np) {
 
   checkTimbreMismatch(np);
 
-  // 同一個音高（半音以內）就直接覆蓋，重複分析同一個檔不會塞爆
+  // Same pitch (within a semitone) just overwrites, so re-analysing one file won't flood the bank
   for (int i = 0; i < n; i++) {
     if (fabsf(1200.0f * log2f(np.f0 / p[i].f0)) < 50.0f) { p[i] = np; return true; }
   }
@@ -65,37 +67,46 @@ bool ProfileBank::add(const InstrumentProfile &np) {
 }
 
 // ---------------------------------------------------------------------------
-//  庫滿了的時候該犧牲誰
+//  Who gets sacrificed when the bank is full
 //
-//  舊版：直接拒收。看起來安全，其實不是 —— 載入順序是「檔名排序」，
-//  所以 32 個小號素材（E3~B5）留下的是 A3 A4 A5 Ab3 Ab4 Ab5 B3 B4 B5 …
-//  這種依字母排出來的 16 個，E3~G3 整段完全沒有素材。
-//  實測那批音的諧波 LSD 是 12~14 dB（>8 就是「音色明顯不同」），
-//  而中高音區同時塞了三四個幾乎重複的音。
+//  Old version: simply refuse. Looks safe, isn't —— load order is "sorted by
+//  filename", so out of 32 trumpet samples (E3~B5) what survived was
+//  A3 A4 A5 Ab3 Ab4 Ab5 B3 B4 B5 … the 16 that happen to sort first
+//  alphabetically, leaving E3~G3 with no material at all.
+//  Measured harmonic LSD for those notes was 12~14 dB (>8 means "audibly a
+//  different timbre"), while the mid-high register held three or four
+//  near-duplicate notes.
 //
-//  現在改成：把新的那組也算進來，找出「音高上最擠的一對」，犧牲其中比較
-//  冗餘的那個。判準是移調距離 —— 音色庫的價值就在於「每個音符都能找到
-//  夠近的素材」，所以要最小化「最大的相鄰間距」。
+//  Now: count the new entry in as well, find "the most crowded pair in pitch",
+//  and sacrifice whichever of the two is the more redundant. The criterion is
+//  transposition distance —— the value of a timbre bank is that "every note
+//  finds a close enough sample", so minimise "the largest gap between
+//  neighbours".
 //
-//  端點特別保護：音域的最低與最高音一旦被換掉，超出去的音就只能靠移調外推，
-//  那比內插差得多。所以只在「非端點」之間挑犧牲者。
+//  Endpoints get special protection: once the lowest or highest note of the
+//  range is replaced, anything beyond it can only be reached by extrapolating a
+//  transposition, which is much worse than interpolating. So only "non-endpoint"
+//  entries are eligible to be sacrificed.
 // ---------------------------------------------------------------------------
 int ProfileBank::evictionTarget(float newF0) const {
   if (n < TC_MAX_PROFILES || newF0 <= 0.0f) return -1;
 
-  // 目標很明確：讓「最大的相鄰間距」越小越好。
+  // The goal is plain: make "the largest gap between neighbours" as small as possible.
   //
-  // 那個數字就是最壞情況下要移調多遠 —— 音色庫的整個價值就在於
-  // 「每個音符都能找到夠近的素材」，所以直接拿它當目標函數，
-  // 不要用什麼「最擠的一對」之類的間接指標。
+  // That number is how far we have to transpose in the worst case —— the whole value
+  // of the timbre bank lies in "every note finds a close enough sample", so use it
+  // directly as the objective function, not some indirect proxy such as "the most
+  // crowded pair".
   //
-  // 第一版就是用間接指標（犧牲跟鄰居最擠的那個），桌機測試立刻抓到它會抖：
-  // log 裡出現「349.2 Hz 換掉 174.6 Hz」，而 174.6 Hz 是它前一步才剛收進來的。
-  // 每一步各自看起來合理，合起來卻在原地繞。
+  // The first version did use the indirect proxy (sacrifice whoever is most crowded
+  // against its neighbour), and the desktop test caught it thrashing straight away:
+  // the log read "349.2 Hz replaces 174.6 Hz", and 174.6 Hz was what it had taken in
+  // one step earlier. Each step looks reasonable on its own; together they go in circles.
   //
-  // n 最多 16，O(n^2) 也才 256 次比較，直接把每個候選犧牲者的結果算出來就好。
+  // n is at most 16, so O(n^2) is only 256 comparisons; just work out the result for
+  // every candidate victim directly.
 
-  // 現有音高（半音，相對 A4），排序
+  // Existing pitches (semitones, relative to A4), sorted
   float cur[TC_MAX_PROFILES];
   for (int i = 0; i < n; i++) cur[i] = 12.0f * log2f(p[i].f0 / 440.0f);
   int idx[TC_MAX_PROFILES];
@@ -109,13 +120,14 @@ int ProfileBank::evictionTarget(float newF0) const {
 
   const float ns = 12.0f * log2f(newF0 / 440.0f);
 
-  // 目標函數：間距平方和。
+  // Objective function: sum of squared gaps.
   //
-  // 為什麼不是「最大間距」：最大間距有一大片平台區 —— 很多次替換算出來的
-  // 最大間距完全相同，於是「只有嚴格變好才換」就永遠卡在原地。實測 32 個
-  // 小號素材用最大間距當目標，最後停在 6 個半音，跟舊版一樣爛。
-  // 平方和沒有平台：只要把能量從大間距搬到小間距，它就會下降，
-  // 所以每一步都推向平均分佈。
+  // Why not "largest gap": the largest gap has a broad plateau —— many candidate
+  // swaps come out with exactly the same largest gap, so "only swap on a strict
+  // improvement" gets stuck forever. Measured on 32 trumpet samples, using largest
+  // gap as the objective stalled at 6 semitones, as bad as the old version.
+  // The sum of squares has no plateau: move energy from a big gap to a small one and
+  // it drops, so every step pushes towards an even distribution.
   auto cost = [](const float *sorted, int cnt, float *outRange) {
     float sum = 0.0f;
     for (int i = 1; i < cnt; i++) {
@@ -131,15 +143,16 @@ int ProfileBank::evictionTarget(float newF0) const {
   float curRange = 0.0f;
   const float curCost = cost(sortedCur, n, &curRange);
 
-  // 新的音高在現有範圍之外嗎？超出範圍的音只能靠外推，沒有任何素材可以參考，
-  // 是所有情況裡最差的一種 —— 所以擴大音域一律收，不看平方和。
+  // Is the new pitch outside the existing range? Notes beyond the range can only be
+  // extrapolated, with no sample at all to work from, which is the worst case there is
+  // —— so always take anything that widens the range, without looking at the sum of squares.
   const bool extendsRange = (ns < sortedCur[0] - 1e-4f) ||
                             (ns > sortedCur[n - 1] + 1e-4f);
 
   int   best = -1;
   float bestCost = 1e30f;
 
-  // 端點不參選：音域的最低與最高一旦被換掉，超出去的音就只能往外推。
+  // Endpoints are exempt: replace the lowest or highest note of the range and anything beyond it can only be extrapolated.
   for (int k = 1; k < n - 1; k++) {
     const int victim = idx[k];
     float cand[TC_MAX_PROFILES + 1];
@@ -154,13 +167,14 @@ int ProfileBank::evictionTarget(float newF0) const {
     const float c = cost(cand, m, nullptr);
     if (c < bestCost) { bestCost = c; best = victim; }
   }
-  if (best < 0) return -1;                       // n <= 2，沒有內部點
+  if (best < 0) return -1;                       // n <= 2, no interior points
 
   if (extendsRange) return best;
 
-  // 範圍內的話，要真的讓分佈更平均才換。
-  // 相等就不換是刻意的：沒有好處的替換只會讓最後留下哪一組取決於載入順序，
-  // 而載入順序是檔名排序 —— 那等於把結果交給檔名決定。
+  // Inside the range, only swap if the distribution genuinely gets more even.
+  // Equal counts as no swap, deliberately: a swap that gains nothing only makes which
+  // entry survives depend on load order, and load order is filename order —— that is
+  // handing the result over to the filenames.
   return (bestCost < curCost - 1e-4f) ? best : -1;
 }
 
@@ -170,7 +184,7 @@ int ProfileBank::nearest(float f0) const {
   int   best = 0;
   float bd   = 1e30f;
   for (int i = 0; i < n; i++) {
-    float d = fabsf(log2f(f0 / p[i].f0));        // 用八度距離，不是 Hz 差
+    float d = fabsf(log2f(f0 / p[i].f0));        // Distance in octaves, not a difference in Hz
     if (d < bd) { bd = d; best = i; }
   }
   return best;
@@ -284,21 +298,27 @@ void profilePrint(const InstrumentProfile &p) {
 }
 
 // ---------------------------------------------------------------------------
-//  頻譜包絡距離
+//  Spectral envelope distance
 //
-//  三個設計決定，每個都是為了避免誤報（誤報比漏報難忍受 —— 每次入庫都跳
-//  警告，看兩次就開始無視了）：
+//  Three design decisions, all of them to avoid false positives (a false positive
+//  is harder to live with than a miss —— a warning on every store gets ignored
+//  after the second time):
 //
-//  1) 只比形狀。兩邊各自扣掉自己在比較區間內的平均值再算差。
-//     錄音音量或麥克風增益不同不該被當成換了樂器。
+//  1) Compare shape only. Each side subtracts its own mean over the comparison
+//     interval before the difference is taken.
+//     A different recording level or mic gain must not read as a change of instrument.
 //
-//  2) 只比「兩邊基頻以上」的頻段。這一條是量出來才知道有多重要：
-//     一開始從 200 Hz 起算，結果同一把小號的 B5 跟 B4 距離高達 17.97 dB ——
-//     因為 B5 的 f0 是 1006 Hz，200 Hz~1 kHz 那段根本沒有諧波，只有噪聲底，
-//     而那段噪聲的形狀跟低音的真實包絡當然完全不同。
-//     那不是音色差異，是音域差異，卻足以讓警告在同一把樂器上狂叫。
+//  2) Compare only the band "above both fundamentals". How much this one matters
+//     only showed up once it was measured:
+//     starting from 200 Hz, B5 and B4 of the same trumpet came out 17.97 dB apart ——
+//     B5 has an f0 of 1006 Hz, so 200 Hz~1 kHz holds no harmonics at all, only the
+//     noise floor, and the shape of that noise is of course nothing like the real
+//     envelope of a low note.
+//     That is not a timbre difference, it is a register difference, yet it is enough
+//     to have the warning screaming at one and the same instrument.
 //
-//  3) 上限 8 kHz。再上去主要是噪聲，而且很多素材本來就沒錄到那麼高。
+//  3) Cap at 8 kHz. Above that it is mostly noise, and plenty of samples were never
+//     recorded that high in the first place.
 // ---------------------------------------------------------------------------
 float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b) {
   if (!a.valid || !b.valid) return 0.0f;
@@ -306,7 +326,7 @@ float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b)
   const float lo = logf(TC_SPECENV_FMIN), hi = logf(TC_SPECENV_FMAX);
   const float step = (hi - lo) / (TC_SPECENV_PTS - 1);
 
-  // 起點取兩者較高的基頻再往上一點。低於基頻的地方沒有諧波可量。
+  // Start a little above the higher of the two fundamentals. Below the fundamental there are no harmonics to measure.
   const float fLo = fmaxf(200.0f, 1.2f * fmaxf(a.f0, b.f0));
   const float fHi = 8000.0f;
 
@@ -322,8 +342,9 @@ float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b)
     sumB += b.specEnv[p];
   }
 
-  // 重疊的頻段太少就沒得比。回 0 代表「不知道」，呼叫端不會發警告 ——
-  // 資訊不足時保持安靜，比亂猜好。
+  // Too little overlapping band and there is nothing to compare. Returning 0 means
+  // "don't know" and the caller raises no warning —— when the evidence is thin, keep
+  // quiet rather than guess.
   if (nUse < 8) return 0.0f;
 
   const float mA = sumA / nUse, mB = sumB / nUse;
@@ -336,17 +357,20 @@ float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b)
 }
 
 // ---------------------------------------------------------------------------
-//  綜合音色距離
+//  Combined timbre distance
 //
-//  每一項都除以「同樂器內部的典型差異」再平方相加，所以輸出大約是
-//  「相當於幾倍的正常音高差異」。1.0 附近 = 很可能是同一把樂器。
+//  Each term is divided by "the typical spread within one instrument" and then
+//  squared and summed, so the output is roughly "how many times a normal
+//  pitch-to-pitch difference this is". Around 1.0 = very likely the same instrument.
 //
-//  尺度是從實測資料訂的（小號 33 音、鋼琴/提琴/長笛各 12 音，共 68 個素材，
-//  2278 組配對）。工具是 tools/sim/envdist，素材換了要重跑。
+//  The scales come from measured data (33 trumpet notes, 12 each for piano/violin/
+//  flute, 68 samples in all, 2278 pairings). The tool is tools/sim/envdist; rerun it
+//  when the samples change.
 //
-//  誠實說明：只有 4 種樂器、權重是手訂的，不是學出來的。
-//  它抓得到「管樂換成鋼琴」這種明顯的情況，但兩種音色相近的樂器
-//  （例如小號換長號）大概分不出來。這是提示，不是判定。
+//  To be honest about it: only 4 instruments, and the weights are hand-set, not
+//  learned. It catches the obvious case, "winds swapped for a piano", but two
+//  instruments of similar timbre (trumpet for trombone, say) it probably cannot tell
+//  apart. This is a hint, not a verdict.
 // ---------------------------------------------------------------------------
 float profileTimbreDistance(const InstrumentProfile &a, const InstrumentProfile &b) {
   if (!a.valid || !b.valid) return 0.0f;
@@ -359,21 +383,22 @@ float profileTimbreDistance(const InstrumentProfile &a, const InstrumentProfile 
   float acc = 0.0f;
   int   n   = 0;
 
-  // 頻譜包絡：同樂器最近鄰中位數 2.26 dB，取 2.5 當尺度
+  // Spectral envelope: within-instrument nearest-neighbour median 2.26 dB, take 2.5 as the scale
   const float dEnv = profileEnvDistance(a, b);
   if (dEnv > 0.0f) { acc += term(dEnv, 0.0f, 2.5f); n++; }
 
-  // 持續段衰減：分辨「會衰減的」與「能持續的」，鋼琴 0.35 vs 管弦 0.96~1.00
+  // Sustain decay: separates "the ones that decay" from "the ones that hold", piano 0.35 vs orchestral 0.96~1.00
   acc += term(a.sustainDecayPerSec, b.sustainDecayPerSec, 0.06f); n++;
 
-  // 非諧性：鋼琴 2.3e-4，管樂 2e-5。弦樂居中且變異大
+  // Inharmonicity: piano 2.3e-4, winds 2e-5. Strings sit in between and vary a lot
   acc += term(a.inharmonicity, b.inharmonicity, 6.0e-5f); n++;
 
-  // 逐諧波微觀起伏：提琴/長笛 0.10~0.13，小號 0.04，鋼琴 0.00
+  // Harmonic-by-harmonic micro-ripple: violin/flute 0.10~0.13, trumpet 0.04, piano 0.00
   acc += term(a.shimmerDepth, b.shimmerDepth, 0.035f); n++;
 
-  // 亮度用 log 比值。銅管的絕對質心幾乎不隨音高變，所以 brightness(=質心/f0)
-  // 在高音會變小 —— 取 log 之後這個音高相依性才不會被當成音色差異。
+  // Brightness uses a log ratio. A brass instrument's absolute centroid barely moves
+  // with pitch, so brightness(=centroid/f0) gets smaller high up —— taking the log is
+  // what keeps that pitch dependence from reading as a timbre difference.
   if (a.brightness > 0.05f && b.brightness > 0.05f) {
     acc += term(log2f(a.brightness), log2f(b.brightness), 0.55f); n++;
   }

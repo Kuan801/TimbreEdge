@@ -1,7 +1,7 @@
-// tools/sim/Wire.h  -  空殼，只為了讓 `make inocheck` 能把 .ino 編一次。
+// tools/sim/Wire.h  -  Empty shim, only so that `make inocheck` can compile the .ino once.
 //
-// .ino 引用 Wire.h 是為了在 setup() 裡設定 OLED 的 I2C 腳位，
-// 而桌機檢查時 TC_USE_OLED=0，那段本來就編不進去。
+// The .ino includes Wire.h in order to set the OLED's I2C pins in setup(),
+// and on the desktop check TC_USE_OLED=0, so that code is not compiled in anyway.
 #pragma once
 
 class TwoWire {
@@ -11,9 +11,10 @@ public:
   void setSCL(int) {}
   void setClock(unsigned long) {}
 
-  // .ino 的 sgtlDump() 會直接讀 SGTL5000 的暫存器，所以這個空殼也要有
-  // 對應的介面才編得過。桌機上沒有 I2C，endTransmission 回傳非 0
-  // （= 沒有回應），語意上剛好就是「這台機器上沒有那顆晶片」。
+  // The .ino's sgtlDump() reads the SGTL5000 registers directly, so this shim needs
+  // the matching interface too, just to compile. There is no I2C on the desktop, so
+  // endTransmission returns non-zero (= no response), which happens to mean exactly
+  // the right thing: "there is no such chip on this machine".
   void    beginTransmission(unsigned char) {}
   size_t  write(unsigned char) { return 1; }
   unsigned char endTransmission(bool = true) { return 2; }

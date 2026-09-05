@@ -1,30 +1,36 @@
 // ============================================================================
 //  tools/sim/fake_mtp/MTP_Teensy.h
 //
-//  KurtE 的 MTP_Teensy 在桌機上的替身，只為了讓 `make inocheck-mtp` 能把
-//  TimbreClone.ino 裡 TC_HAS_MTP=1 那條路徑也編譯一次。
+//  A desktop stand-in for KurtE's MTP_Teensy, only so that `make inocheck-mtp`
+//  also compiles the TC_HAS_MTP=1 path through TimbreClone.ino once.
 //
-//  為什麼需要它：那些 MTP 程式碼包在 #if TC_HAS_MTP 裡，而桌機這邊
-//  USB_MTPDISK_SERIAL 永遠沒有定義，所以平常的 inocheck 根本走不到 ——
-//  等於那段程式在真的燒錄之前完全沒有編譯涵蓋。fake_usbhost 當初就是為了
-//  同一個理由存在的，這裡照抄那個做法。
+//  Why it is needed: that MTP code sits inside #if TC_HAS_MTP, and on the
+//  desktop USB_MTPDISK_SERIAL is never defined, so the ordinary inocheck never
+//  reaches it -- meaning that code had no compile coverage at all until an
+//  actual flash. fake_usbhost exists for exactly the same reason; this copies
+//  that approach.
 //
-//  ── 這個檔案的教訓 ────────────────────────────────────────────────────
-//  第一版把 send_DeviceResetEvent() 寫成公開的 void，inocheck-mtp 順利通過，
-//  然後在真的機器上編譯失敗：「'int MTP_class::send_DeviceResetEvent()'
-//  is private within this context」。
+//  ── What this file taught us ──────────────────────────────────────────
+//  The first version declared send_DeviceResetEvent() as a public void,
+//  inocheck-mtp passed happily, and then the build failed on the real machine:
+//  "'int MTP_class::send_DeviceResetEvent()' is private within this context".
 //
-//  真相是 MTP_Teensy 把所有 send_*Event() 都包在 #if USE_EVENTS == 1 裡，
-//  而那個巨集在函式庫的編譯單元裡是關的；名稱查找因此落到私有區那份同名宣告。
-//  替身寫得比真品寬鬆，等於把這個檢查變成一張假的通行證 —— 比沒有檢查更糟，
-//  因為它會讓人以為已經驗過了。
+//  The truth is that MTP_Teensy wraps every send_*Event() in #if USE_EVENTS == 1,
+//  and that macro is off inside the library's own translation unit; name lookup
+//  therefore lands on the identically named declaration in the private section.
+//  A stand-in written looser than the real thing turns this check into a fake
+//  pass -- worse than no check at all, because it makes you believe you already
+//  verified it.
 //
-//  所以下面刻意複製真品的結構：USE_EVENTS 預設 0、事件函式包在條件裡、
-//  私有區留一份同名宣告。這樣桌機這邊會複製出一模一樣的編譯錯誤。
-//  替身的規則是「照抄，不要放寬」。
+//  So the structure of the real thing is reproduced deliberately below:
+//  USE_EVENTS defaults to 0, the event functions are inside the conditional,
+//  and the private section keeps an identically named declaration. That way the
+//  desktop reproduces exactly the same compile error.
+//  The rule for a stand-in is "copy it, do not relax it".
 //
-//  介面出處：https://github.com/KurtE/MTP_Teensy 的 src/MTP_Teensy.h
-//  這個檔案永遠不會被燒進 Teensy：韌體端的 include 路徑不含 tools/sim。
+//  Interface source: src/MTP_Teensy.h in https://github.com/KurtE/MTP_Teensy
+//  This file never gets flashed to the Teensy: the firmware include path does
+//  not contain tools/sim.
 // ============================================================================
 #pragma once
 
@@ -32,13 +38,14 @@
 #include <SD.h>
 
 #ifndef USE_EVENTS
-#define USE_EVENTS 0        // 跟真品一樣預設關閉
+#define USE_EVENTS 0        // Off by default, same as the real thing
 #endif
 
 class MTP_class {
  private:
-  // 真品在私有區也有這一份。公開那份被 USE_EVENTS 關掉時，名稱查找會找到它，
-  // 於是錯誤訊息是「is private」而不是「沒有這個成員」。
+  // The real thing has this copy in the private section too. When the public one
+  // is switched off by USE_EVENTS, name lookup finds this one, so the error reads
+  // "is private" instead of "no such member".
   int send_DeviceResetEvent(void) { return 0; }
 
  public:

@@ -1,5 +1,5 @@
 // ============================================================================
-//  wav_io.h  -  極簡 16-bit PCM WAV 讀寫 (支援 mono / stereo，讀取時自動降成 mono)
+//  wav_io.h  -  minimal 16-bit PCM WAV read/write (mono / stereo, downmixed to mono on read)
 // ============================================================================
 #pragma once
 
@@ -7,64 +7,66 @@
 #include <SD.h>
 #include "config.h"
 
-// SD 初始化：先試 Teensy 4.1 內建 SDIO，失敗再試 Audio Shield 的 SPI 插槽
+// SD init: try the Teensy 4.1 built-in SDIO first, fall back to the Audio Shield's SPI slot
 bool tcSdBegin();
 
-// 列出根目錄內容。診斷用：可以立刻分辨「SD 沒掛起來」和「檔案不在卡上」。
+// List the root directory. For diagnostics: tells "the SD did not mount" apart from "the file is not on the card" at a glance.
 void tcSdList();
 
-// 掃描某個目錄底下所有 .WAV，把檔名收集到 outNames（每筆 TC_MAX_NAME_LEN bytes）。
-// dir 傳 "/" 代表根目錄。回傳找到幾個。
-// skipName 非 NULL 時會跳過該檔（例如批次載入時排除剛錄的 REC.WAV）。
+// Scan a directory for every .WAV, collecting the names into outNames (TC_MAX_NAME_LEN bytes each).
+// Pass "/" as dir for the root directory. Returns how many were found.
+// A non-NULL skipName skips that file (e.g. excluding the just-recorded REC.WAV during a batch load).
 int tcSdCollectWavs(const char *dir, char *outNames, int maxCount,
                     const char *skipName = nullptr);
 
-// 複製檔案（採樣模式要把 REC.WAV 另存成 A4.WAV 這種以音高命名的檔）
+// Copy a file (sampling mode saves REC.WAV as a pitch-named file like A4.WAV)
 bool tcSdCopy(const char *src, const char *dst);
 
-// ------------------------------------------------------- 採樣資料夾（SETnn）--
+// ------------------------------------------------- sampling folders (SETnn) --
 //
-// 每次連續採樣都開一個新資料夾（SET01、SET02…），那一輪的音檔全部收在裡面。
+// Every continuous sampling run opens a new folder (SET01, SET02, ...) and all of that run's WAVs go in it.
 //
-// 為什麼要分：以前所有音檔都堆在根目錄，第二次採樣的 C4.WAV 會直接蓋掉第一次的，
-// 而且「n *」會把不同樂器、不同輪次的素材全部混在一起訓練，從外面完全看不出來。
-// 分資料夾之後，一輪就是一組，要用哪一組就 "n SET01/"。
+// Why separate them: everything used to pile up in the root, so the second run's C4.WAV
+// simply overwrote the first one's, and "n *" would train on material from different
+// instruments and different runs all mixed together, with no way to tell from the outside.
+// With folders, one run is one set, and choosing a set is just "n SET01/".
 //
-// 為什麼用流水號而不是時間戳記：Teensy 4.1 的 RTC 要裝鈕扣電池才會走。
-// 沒電池的話每次開機都從同一個時間開始，時間戳記反而會互相覆蓋 ——
-// 比流水號更糟。流水號只依賴「卡上已經有哪些資料夾」，永遠正確。
+// Why a running number and not a timestamp: the Teensy 4.1 RTC only runs with a coin cell
+// fitted. Without one, every boot starts from the same time, so timestamps would overwrite
+// each other -- worse than a running number. A running number depends only on which folders
+// are already on the card, so it is always right.
 
 #define TC_SET_PREFIX      "SET"
 #define TC_SET_MAX         99
 
-// 找出下一個沒用過的 SETnn 並建立它。成功時把名字寫進 out（例如 "SET03"）。
-// 卡上已經有 SET01~SET99 就回 false。
+// Find the next unused SETnn and create it. On success the name is written to out (e.g. "SET03").
+// Returns false when SET01~SET99 already exist on the card.
 bool tcSdMakeNextSet(char *out, size_t cap);
 
-// 這個名字是不是採樣資料夾（SET 開頭 + 兩位數字）。
-// 純字串判斷，桌機測得到。
+// Whether this name is a sampling folder (SET prefix + two digits).
+// Pure string logic, testable on the desktop.
 bool tcIsSetDir(const char *name);
 
-// 掃出卡上所有採樣資料夾，依名稱排序。回傳找到幾個。
+// Scan the card for every sampling folder, sorted by name. Returns how many were found.
 int tcSdCollectSets(char *outNames, int maxCount);
 
-// 刪掉一整個資料夾（先刪裡面的檔，再刪目錄本身）。
-// deletedFiles / freedBytes 非 NULL 時回報刪了幾個檔、釋放多少空間。
+// Delete a whole folder (the files inside first, then the directory itself).
+// When non-NULL, deletedFiles / freedBytes report how many files went and how much space was freed.
 bool tcSdRemoveDir(const char *dir, int *deletedFiles = nullptr,
                    uint32_t *freedBytes = nullptr);
 
-// ------------------------------------------------------------------ 讀取器 --
+// ------------------------------------------------------------------ reader --
 class WavReader {
 public:
   bool     open(const char *path);
   void     close();
   bool     isOpen() const { return _open; }
 
-  uint32_t frames()     const { return _frames; }      // 每聲道的取樣點數
+  uint32_t frames()     const { return _frames; }      // Sample frames per channel
   uint32_t sampleRate() const { return _sampleRate; }
   uint16_t channels()   const { return _channels; }
 
-  // 從第 frameIndex 個取樣點開始讀 n 點 (mono float, -1..1)。回傳實際讀到的點數。
+  // Read n frames starting at frame frameIndex (mono float, -1..1). Returns how many were actually read.
   uint32_t readMono(uint32_t frameIndex, float *dst, uint32_t n);
 
 private:
@@ -77,19 +79,20 @@ private:
   uint16_t _bits       = 16;
 };
 
-// ------------------------------------------------------------------ 寫入器 --
+// ------------------------------------------------------------------ writer --
 class WavWriter {
 public:
-  // expectedSamples > 0 時會先把正確長度寫進標頭。
-  // 這樣即使某些 SD 實作不允許回頭 seek 改標頭，檔案仍然是合法的 WAV。
+  // With expectedSamples > 0 the correct length goes into the header up front, so the file
+  // is still a valid WAV even where the SD implementation forbids seeking back to patch it.
   bool open(const char *path, uint32_t sampleRate = 44100, uint16_t channels = 1,
             uint32_t expectedSamples = 0);
-  bool writeSamples(const int16_t *src, uint32_t n);   // n = int16 個數
-  void close();                                        // 回頭補正 RIFF 長度
-  // 錄製途中就把 RIFF/data 長度補到目前為止的正確值，然後 flush 到卡上。
-  // 為什麼需要：長度只在 close() 補的話，「還沒按停就斷電／重開機／拔卡」
-  // 留下的檔案 data 長度是 0 —— Windows 直接判定損毀不給播，即使裡面
-  // 已經有好幾 MB 的音訊。詳見 wav_io.cpp 的說明。
+  bool writeSamples(const int16_t *src, uint32_t n);   // n = number of int16 samples
+  void close();                                        // Seek back and fix up the RIFF length
+  // Patch the RIFF/data lengths to their correct value so far while still recording,
+  // then flush to the card. Why this is needed: if the lengths are only patched in
+  // close(), a file left behind by "power lost / reset / card pulled before stop was
+  // pressed" has a data length of 0 -- Windows declares it corrupt and refuses to play
+  // it, even with several MB of audio already inside. See the notes in wav_io.cpp.
   void flushHeader();
   bool isOpen() const { return _open; }
   uint32_t bytesWritten() const { return _dataBytes; }
@@ -102,8 +105,10 @@ private:
   uint16_t _channels   = 1;
 };
 
-// 這個檔名是不是「程式自己產生的音檔」（REC.WAV / PLAY.WAV / 純音名檔）。
+// Whether this filename is a WAV the program generated itself (REC.WAV / PLAY.WAV /
+// a plain note-name file).
 //
-// 拉出來放這裡而不是留在 .ino，是因為它是刪檔用的判斷 —— 誤刪使用者辛苦錄的
-// 素材不可逆，這種規則必須測得到。見 tools/sim/wavname_test.cpp。
+// It lives here rather than in the .ino because it is the test used for deleting files --
+// wrongly deleting material the user worked hard to record cannot be undone, so a rule
+// like this has to be testable. See tools/sim/wavname_test.cpp.
 bool tcIsGeneratedWav(const char *name);

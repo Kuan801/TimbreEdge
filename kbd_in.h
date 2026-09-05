@@ -1,37 +1,41 @@
 // ============================================================================
-//  kbd_in.h  -  用一般 USB 電腦鍵盤當琴鍵，順便當選單的方向鍵
+//  kbd_in.h  -  an ordinary USB computer keyboard as piano keys, doubling as the menu arrows
 //
-//  插在 USB Host 埠上就能用，一條線都不用接。
+//  Plug it into the USB Host port and it works; not a single wire to connect.
 //
-//  --- 鍵位對應（DAW 的打字鍵盤慣例）------------------------------------------
+//  --- Key mapping (the DAW typing-keyboard convention) -----------------------
 //
-//      上排 = 高八度            2 3   5 6 7          <- 黑鍵
-//                              Q W E R T Y U        <- 白鍵   C5 ~ B5
+//      Upper row = octave up      2 3   5 6 7          <- black keys
+//                                 Q W E R T Y U        <- white keys   C5 ~ B5
 //
-//      下排 = 音色庫原位         S D   G H J          <- 黑鍵
-//                              Z X C V B N M        <- 白鍵   C4 ~ B4
+//      Lower row = bank position  S D   G H J          <- black keys
+//                                 Z X C V B N M        <- white keys   C4 ~ B4
 //
-//      左/右方向鍵   整體移調 -1 / +1 個八度
-//      空白鍵        全部停音
-//      Esc           離開琴鍵模式
+//      Left/Right arrow   transpose everything by -1 / +1 octave
+//      Space              all notes off
+//      Esc                leave key mode
 //
-//  在選單裡（沒進琴鍵模式時）：
-//      上/下方向鍵 = 移動游標   Enter = 確定   Esc / Backspace = 返回
+//  In the menu (when key mode is not active):
+//      Up/Down arrow = move the cursor   Enter = OK   Esc / Backspace = back
 //
-//  --- 兩個必須先知道的限制 ---------------------------------------------------
+//  --- Two limitations to know about first ------------------------------------
 //
-//  1) 和弦數有上限。USB HID 的 boot protocol 一次只回報 6 個按鍵，而便宜的
-//     薄膜鍵盤更慘 —— 沒有防鬼鍵設計的話，某些三鍵組合就會漏鍵或多出沒按的鍵。
-//     這是鍵盤硬體的限制，程式端無解。想彈四音以上的和弦要挑標示
-//     「N-key rollover」或「anti-ghosting」的機械鍵盤。
+//  1) There is a limit on chord size. The USB HID boot protocol only reports 6
+//     keys at a time, and cheap membrane keyboards are worse -- with no
+//     anti-ghosting design, certain three-key combinations drop keys or invent
+//     ones nobody pressed. That is a keyboard hardware limit; nothing the firmware
+//     can do. For chords of four notes or more, pick a mechanical keyboard
+//     advertising "N-key rollover" or "anti-ghosting".
 //
-//  2) 沒有力度。HID 鍵盤只回報按下/放開，測不出力道。跟實體按鈕一樣。
+//  2) No velocity. An HID keyboard only reports press/release, force cannot be
+//     measured. Same as the physical buttons.
 //
-//  --- 為什麼用 raw keycode 而不是 ASCII -------------------------------------
+//  --- Why raw keycodes and not ASCII ----------------------------------------
 //
-//  attachRawPress() 給的是 HID usage code，對應的是「鍵盤上的實體位置」。
-//  用 ASCII 的話，換成非 QWERTY 佈局（或使用者切到中文輸入法）就全亂了。
-//  實體位置在任何佈局下都一樣，Z 鍵永遠是左下角那一顆。
+//  attachRawPress() gives the HID usage code, which corresponds to the physical
+//  position on the keyboard. With ASCII, a non-QWERTY layout (or the user switching
+//  to a Chinese input method) throws everything off. Physical positions are the
+//  same under any layout: the Z key is always the bottom-left one.
 // ============================================================================
 #pragma once
 
@@ -39,12 +43,13 @@
 #include <stddef.h>
 #include "ui.h"
 
-// 只用到指標，前置宣告就夠。
-// 這麼寫的用意是讓 tools/sim/kbd_test.cpp 能塞一個假的合成器進來 ——
-// 有了它，「Z 鍵到底送出哪個音高」在桌機上就驗得到，不必燒進去用耳朵聽。
+// Only used through a pointer, so a forward declaration is enough.
+// Written this way so tools/sim/kbd_test.cpp can drop in a fake synth -- with it,
+// "which pitch does the Z key actually send" is verifiable on the desktop, instead
+// of flashing the thing and listening for it.
 class AudioSynthAdditive;
 
-// HID usage code（跟鍵盤語言無關，是實體位置）
+// HID usage code (independent of keyboard language; it is the physical position)
 #define HID_A 0x04
 #define HID_B 0x05
 #define HID_C 0x06
@@ -80,36 +85,38 @@ class AudioSynthAdditive;
 #define HID_DOWN      0x51
 #define HID_UP        0x52
 
-#define TC_KBD_MAX_DOWN 8      // 同時追蹤幾顆（HID boot protocol 上限是 6）
+#define TC_KBD_MAX_DOWN 8      // How many are tracked at once (the HID boot protocol caps it at 6)
 
 class KbdInput {
 public:
   void begin(AudioSynthAdditive *synth);
 
-  // 餵一個 HID 鍵碼進來。回傳「這一顆有沒有被當成選單按鍵」——
-  // 有的話呼叫端要把對應的 UiKey 丟給選單。
+  // Feed in one HID keycode. Returns whether this key was taken as a menu key --
+  // if it was, the caller has to hand the corresponding UiKey to the menu.
   //
-  // 拉成公開介面的理由跟 MidiInput::feed() 一樣：這段邏輯跟 USB 無關，
-  // 桌機測得到。之前 USB MIDI 只能在硬體上驗，來回花掉好幾輪。
+  // Public for the same reason as MidiInput::feed(): this logic has nothing to do
+  // with USB and is testable on the desktop. USB MIDI could only be verified on
+  // hardware before, and that cost several round trips.
   UiKey feed(uint8_t hidCode, bool pressed);
 
-  // USB 回呼專用：呼叫 feed()，並把選單按鍵排進佇列。
+  // For the USB callbacks: calls feed() and queues the menu key.
   //
-  // 為什麼要排隊而不是直接餵給 gUi：回呼是在 usbHost.Task() 裡面被呼叫的，
-  // 而 Ui::feed() 會回傳指令字串、由 .ino 拿去執行 —— 那些指令（分析、訓練）
-  // 動輒阻塞好幾秒。在 USB 的處理迴圈裡做那種事會把後續封包丟掉。
-  // 排進佇列、等回到 loop() 再處理，就沒這個問題。
+  // Why queue it instead of feeding gUi directly: the callback is invoked from
+  // inside usbHost.Task(), while Ui::feed() returns a command string for the .ino
+  // to execute -- and those commands (analyze, train) routinely block for seconds.
+  // Doing that inside the USB processing loop drops the packets that follow.
+  // Queue it and handle it once back in loop(), and the problem is gone.
   void feedFromUsb(uint8_t hidCode, bool pressed);
-  UiKey popUiKey();                      // 沒有待處理的就回 UI_KEY_NONE
+  UiKey popUiKey();                      // Returns UI_KEY_NONE when nothing is pending
 
-  void setEnabled(bool on);              // 進出琴鍵模式
+  void setEnabled(bool on);              // Enter / leave key mode
   bool enabled() const { return _on; }
 
   uint32_t pressCount() const { return _presses; }
   uint32_t noteCount()  const { return _notes; }
 
-  // USB Host 的啟動與輪詢。實作在 kbd_in.cpp 的 TC_USE_USB_KBD 區段裡，
-  // 桌機模擬編成空函式。
+  // Bring up and poll the USB Host. Implemented in the TC_USE_USB_KBD section of
+  // kbd_in.cpp; compiled to empty functions in the desktop simulator.
   void usbBegin();
   void usbService();
 
@@ -124,7 +131,7 @@ public:
   void downText(char *out, size_t cap) const;
 
 private:
-  // 這個鍵碼對應到哪個音（相對 C4 的半音數）；不是琴鍵就回 -1
+  // Which note this keycode maps to (semitones relative to C4); -1 if it is not a piano key
   static int noteOf(uint8_t hidCode);
 
   AudioSynthAdditive *_synth = nullptr;
@@ -136,11 +143,12 @@ private:
   Down _down[TC_KBD_MAX_DOWN];
   int  _nDown = 0;
 
-  uint32_t _presses = 0;                 // 收到的按下事件總數（診斷用）
-  uint32_t _notes   = 0;                 // 其中真的變成音符的
+  uint32_t _presses = 0;                 // Total press events received (for diagnostics)
+  uint32_t _notes   = 0;                 // How many of those actually turned into notes
 
-  // 佇列不必 volatile：USBHost_t36 的回呼是從 usbHost.Task() 裡分派的，
-  // 而 Task() 跟 uiTick() 都在 loop() 同一條執行緒上，兩邊不會同時動它。
+  // The queue does not need volatile: USBHost_t36 dispatches its callbacks from
+  // usbHost.Task(), and both Task() and uiTick() run on the same thread in loop(),
+  // so the two never touch it at the same time.
   static const int QN = 8;
   UiKey   _q[QN];
   uint8_t _qHead = 0, _qTail = 0;

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# 產生「目標 vs 輸出」頻譜圖比較表（Timbre Shadowing 圖 9~13 的同一種版式）
+# Builds the "target vs output" spectrogram comparison grid (the same layout as
+# figures 9~13 of Timbre Shadowing)
 import sys, wave, numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -36,15 +37,15 @@ def panel(ax, cax, x, sr, title, tmax):
     cb.outline.set_linewidth(0.4)
 
 def build(rows, out_png, tmax=2.0):
-    """rows: [(label, ref_wav, syn_wav), ...] — 由上而下"""
+    """rows: [(label, ref_wav, syn_wav), ...] — top to bottom"""
     n = len(rows)
-    ROW_IN = 3.50                      # 每列高度（英吋）
+    ROW_IN = 3.50                      # height of each row (inches)
     fig = plt.figure(figsize=(9.60, ROW_IN*n), dpi=100)
     for i, (label, rp, sp) in enumerate(rows):
-        band_top = 1.0 - i/n           # 這一列的上緣（figure 座標）
+        band_top = 1.0 - i/n           # top edge of this row (figure coordinates)
         lab_y    = band_top - 0.012/n*3.5
-        b        = band_top - (0.80/n) # 圖框底
-        h        = 0.58/n              # 圖框高
+        b        = band_top - (0.80/n) # axes bottom
+        h        = 0.58/n              # axes height
         fig.text(0.012, lab_y, label, fontsize=7.5, va="top", ha="left")
         axL = fig.add_axes([0.055, b, 0.350, h])
         cL  = fig.add_axes([0.419, b, 0.011, h])
