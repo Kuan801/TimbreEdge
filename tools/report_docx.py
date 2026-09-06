@@ -1,33 +1,4 @@
 #!/usr/bin/env python3
-# =============================================================================
-#  report_docx.py  -  turn evaluate.py's JSON into a Word report
-#
-#  Usage
-#  -----
-#    python3 evaluate.py PLAY.WAV material_dir/ --start 60 --count 24 \
-#            --json report.json --plot report.png
-#    python3 report_docx.py report.json --plot report.png --out timbre_report.docx \
-#            --source "Iowa MIS piano mf, 12 notes C4~B4" \
-#            --method "Teensy 4.1 hardware, pressed w to record PLAY.WAV"
-#
-#  --- Two design decisions -------------------------------------------------
-#
-#  1) It eats the JSON; it does not parse the table evaluate.py prints.
-#     That table is for humans, and its column widths and wording get adjusted
-#     for readability at any time. Use it as a data interface and one alignment
-#     tweak breaks it silently — and the breakage looks like "numbers in the
-#     wrong column", not like an error.
-#
-#  2) The interpretation criteria are imported from evaluate.py, not copied out
-#     again here. Two copies means a threshold gets changed on one side only,
-#     while the report's colours and conclusions stay exactly as they were —
-#     the sort of error that leaves no trace at all.
-#
-#  The report carries only the measured numbers and the interpretation criteria;
-#  it does not draw the conclusion for the user — that is for whoever reads it to
-#  judge against the criteria, which is also the first thing the supervising
-#  professor will ask about.
-# =============================================================================
 
 import argparse
 import datetime
@@ -45,23 +16,20 @@ from docx.shared import Pt, RGBColor, Cm
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from evaluate import CRITERIA, METRIC_KEYS, grade   # noqa: E402
 
-# Light background. Word's shading colour is plain RRGGBB digits, no # prefix.
 FILL = {"good": "E8F5E9", "ok": "FFF8E1", "bad": "FFEBEE", "na": "F5F5F5"}
 MEAN_FILL = "CFD8DC"
 HDR_FILL = "ECEFF1"
 
-CJK_FONT = "Microsoft JhengHei"   # Microsoft JhengHei; if it is missing, Word finds a substitute itself
-
+CJK_FONT = "Microsoft JhengHei"
 
 def set_cell_bg(cell, hexcolor):
-    """python-docx has no shading API, so we have to insert w:shd ourselves."""
+
     tcPr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear")          # must be clear; solid turns the whole cell black
+    shd.set(qn("w:val"), "clear")
     shd.set(qn("w:color"), "auto")
     shd.set(qn("w:fill"), hexcolor)
     tcPr.append(shd)
-
 
 def set_run_font(run, size=None, bold=None, color=None):
     if size is not None:
@@ -71,9 +39,8 @@ def set_run_font(run, size=None, bold=None, color=None):
     if color is not None:
         run.font.color.rgb = RGBColor.from_string(color)
     run.font.name = CJK_FONT
-    # Chinese needs eastAsia set separately, or Word lays it out in the default font
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), CJK_FONT)
 
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), CJK_FONT)
 
 def para(doc, text="", size=10, bold=False, italic=False, color=None,
          align=None, after=6):
@@ -86,7 +53,6 @@ def para(doc, text="", size=10, bold=False, italic=False, color=None,
         p.alignment = align
     return p
 
-
 def put_cell(cell, text, *, bold=False, fill=None, align=WD_ALIGN_PARAGRAPH.RIGHT,
              size=8):
     cell.text = ""
@@ -98,24 +64,19 @@ def put_cell(cell, text, *, bold=False, fill=None, align=WD_ALIGN_PARAGRAPH.RIGH
     if fill:
         set_cell_bg(cell, fill)
 
-
 def fmt(key, v):
     if v is None:
         return "—"
     return CRITERIA[key][1](v)
 
-
 def short_name(key):
-    """Headers have to be short, or 9 columns will not fit on A4."""
+
     n = CRITERIA[key][0]
     return n.replace(" r", "").replace("誤差", "").replace("相關性", "")
 
-
-# --------------------------------------------------------------------------
 def build(data, args):
     doc = Document()
 
-    # A4 portrait; tighten the margins a little so a 10-column table fits
     sec = doc.sections[0]
     sec.left_margin = sec.right_margin = Cm(1.8)
     sec.top_margin = sec.bottom_margin = Cm(2.0)
@@ -127,7 +88,6 @@ def build(data, args):
 
     notes = data["notes"]
 
-    # --------------------------------------------------------------- Title --
     h = doc.add_heading(args.title, level=0)
     for r in h.runs:
         r.font.name = CJK_FONT
@@ -135,7 +95,6 @@ def build(data, args):
     para(doc, "產生時間：" + datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
          size=9, italic=True, after=12)
 
-    # ---------------------------------------------- Measurement conditions --
     doc.add_heading("一、量測條件", level=1)
     para(doc, f"原始素材：{args.source}")
     para(doc, f"合成方式：{args.method}")
@@ -147,7 +106,6 @@ def build(data, args):
               "所有跟時間有關的指標都先對齊起音點 —— 不對齊的話，切點的誤差會污染每一項數字。",
          after=12)
 
-    # ------------------------------------------------- Per-note comparison --
     doc.add_heading("二、逐音對照", level=1)
     para(doc, "綠底＝很好，黃底＝可接受，紅底＝超出範圍。判讀標準見第三節。",
          size=9, after=6)
@@ -180,7 +138,6 @@ def build(data, args):
     para(doc, f"共 {len(notes)} 個音：{n_all_good} 個全部指標都落在「很好」，"
               f"{n_any_bad} 個至少有一項超出可接受範圍。", after=12)
 
-    # ----------------------------------------- Interpretation criteria -----
     doc.add_heading("三、指標與判讀標準", level=1)
     para(doc, "這些門檻不是這份報告訂的，是 evaluate.py 既有的標準，"
               "所有評測共用同一套，數字才能跨次比較。", size=9, after=6)
@@ -204,7 +161,6 @@ def build(data, args):
               "LSD、頻譜圖、質心都看不到它，但耳朵聽得出來"
               "（少了呼吸感、弓噪、槌擊聲）。", size=9, after=12)
 
-    # -------------------------------------------------------------- Plot ---
     sec_no = 4
     if args.plot and os.path.exists(args.plot):
         doc.add_heading(f"四、比較圖", level=1)
@@ -212,7 +168,6 @@ def build(data, args):
         doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
         sec_no = 5
 
-    # ----------------------------------------------------- Per-note detail --
     cn = {4: "四", 5: "五"}[sec_no]
     doc.add_heading(f"{cn}、逐音明細", level=1)
     for n in notes:
@@ -235,7 +190,6 @@ def build(data, args):
 
     return doc
 
-
 def main():
     ap = argparse.ArgumentParser(description="把 evaluate.py 的 JSON 變成 Word 報告")
     ap.add_argument("json", help="evaluate.py --json 產生的檔案")
@@ -255,7 +209,6 @@ def main():
 
     build(data, args).save(args.out)
     print(f"已輸出 {args.out}（{len(data['notes'])} 個音）")
-
 
 if __name__ == "__main__":
     main()

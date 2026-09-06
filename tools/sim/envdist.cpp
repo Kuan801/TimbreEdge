@@ -1,21 +1,3 @@
-// ============================================================================
-//  envdist.cpp  -  measure "how far apart two timbres' spectral envelopes are"
-//
-//  Usage:  ./envdist A.WAV B.WAV [C.WAV ...]
-//
-//  Why it is needed: ProfileBank::add() has to warn when "this timbre is very
-//  different from what the bank already holds" (usually that means the
-//  instrument was swapped without clearing the bank first). But the threshold
-//  cannot be guessed -- too low and it cries wolf all day, too high and it may
-//  as well not be there.
-//
-//  This tool prints the pairwise distance over all the material, so the
-//  threshold rests on a measured distribution:
-//    same instrument, different pitch  -> distance should be small (the envelope
-//                                         is pitch-independent by design)
-//    different instruments             -> distance should be large
-//  Only if the two piles are far enough apart can a line be drawn between them.
-// ============================================================================
 #include <Arduino.h>
 #include <Audio.h>
 #include <cstdio>
@@ -37,9 +19,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // The SD sim layer prepends a root directory to every path. Material is
-  // usually scattered around, so set the root to "/" and absolute paths work
-  // straight from the command line.
   extern std::string sim_sd_root;
   sim_sd_root = "";
 
@@ -60,7 +39,6 @@ int main(int argc, char **argv) {
   const int n = (int)ps.size();
   if (n < 2) { printf("素材不足\n"); return 1; }
 
-  // Instrument name = the part before the first '.' (Trumpet.vib.ff.C4 -> Trumpet)
   std::vector<std::string> inst;
   for (int i = 0; i < n; i++) {
     size_t d = names[i].find('.');
@@ -70,15 +48,13 @@ int main(int argc, char **argv) {
   std::vector<float> same, diff;
   std::map<std::string, std::vector<float>> crossPair;
   std::map<std::string, std::vector<float>> selfPair;
-  // Print the farthest same-instrument pair -- a big number need not mean the
-  // metric is bad, it can also mean bad material (a multi-note file slipped in,
-  // a botched take). Without seeing which pair it is, you cannot tell them apart.
+
   std::vector<std::pair<float, std::string>> worstSame;
 
   for (int i = 0; i < n; i++)
     for (int j = i + 1; j < n; j++) {
       const float d = profileTimbreDistance(ps[i], ps[j]);
-      if (d <= 0.0f) continue;                 // too few overlapping bands, leave it out of the statistics
+      if (d <= 0.0f) continue;
       if (inst[i] == inst[j]) {
         same.push_back(d);
         selfPair[inst[i]].push_back(d);
@@ -116,19 +92,6 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < worstSame.size() && i < 8; i++)
     printf("  %6.2f  %s\n", worstSame[i].first, worstSame[i].second.c_str());
 
-  // -------------------------------------------------------------------------
-  //  Leave-one-out nearest neighbour
-  //
-  //  What insertion really has to ask is not "how far from the bank's average"
-  //  but "how far from the closest set in the bank" -- synthesis picks the set
-  //  with the nearest pitch anyway.
-  //
-  //  The average gets wrecked by the piano: its within-instrument distance
-  //  reaches 15 dB, farther than "trumpet vs violin", so no absolute threshold
-  //  can serve all four instruments at once. Nearest neighbour is different:
-  //  however much a piano note varies, it always still has a neighbour it
-  //  resembles.
-  // -------------------------------------------------------------------------
   {
     std::vector<float> nnSame, nnCross;
     for (int i = 0; i < n; i++) {
@@ -158,18 +121,11 @@ int main(int argc, char **argv) {
     }
   }
 
-  // -------------------------------------------------------------------------
-  //  Realistic scenario: the bank is full of instrument A, now add a note of B
-  //
-  //  This is the problem ProfileBank::add() actually faces. The "nearest over
-  //  all other instruments" above is a pessimistic estimate -- in practice the
-  //  bank only ever holds one instrument.
-  // -------------------------------------------------------------------------
   {
     const float TH = 2.0f;
     std::vector<std::string> insts;
     for (auto &kv : selfPair) insts.push_back(kv.first);
-    // selfPair only covers instruments that had a same-instrument pair; re-collect from inst to be safe
+
     insts.clear();
     for (int i = 0; i < n; i++)
       if (std::find(insts.begin(), insts.end(), inst[i]) == insts.end())
@@ -206,7 +162,6 @@ int main(int argc, char **argv) {
     printf("  對角線 = 誤報率（同樂器不該叫），其餘 = 偵測率（換樂器該叫）\n");
   }
 
-  // Suggested threshold: almost no false alarms within an instrument, catch as much cross-instrument as possible
   printf("\n=== 門檻掃描（用平均，供對照）===\n");
   printf("  門檻   同樂器誤報率   跨樂器偵測率\n");
   for (float th = 3.0f; th <= 9.01f; th += 0.5f) {

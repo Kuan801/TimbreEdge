@@ -28,8 +28,7 @@ void Keys::setTranspose(int8_t semi) {
   if (semi < -24) semi = -24;
   if (semi >  24) semi =  24;
   if (semi == _transpose) return;
-  // Kill sounding notes before transposing, otherwise the release would noteOff
-  // the new pitch and the old note would never stop
+
   if (_on) setEnabled(false), setEnabled(true);
   _transpose = semi;
 }
@@ -61,28 +60,24 @@ void Keys::service() {
 
     if (raw && !k.stable) {
       k.stable = true;
-      int midi = 60 + i + _transpose;          // 60 = C4
+      int midi = 60 + i + _transpose;
       if (midi < 0)   midi = 0;
       if (midi > 127) midi = 127;
       k.playing = (uint8_t)midi;
       _mask |= (uint16_t)(1u << i);
-      // Fixed velocity -- a tactile switch cannot measure force. Velocity would
-      // need pressure-sensing keys, and the source material is single-velocity
-      // anyway, so it could not be reproduced even if we could measure it.
+
       _synth->noteOn((float)midi, 0.85f, 0.5f);
 
     } else if (!raw && k.stable) {
       k.stable = false;
       _mask &= (uint16_t)~(1u << i);
-      // Release the pitch we actually sent, not a recomputed one -- a transpose
-      // in between would make them disagree
+
       if (k.playing) _synth->noteOff((float)k.playing);
       k.playing = 0;
     }
   }
 }
 
-// For the panel: format the held keys as a string like "C E G"
 void keysDownText(char *out, size_t cap) {
   out[0] = 0;
   size_t used = 0;

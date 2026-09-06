@@ -1,15 +1,3 @@
-// ============================================================================
-//  tools/sim/sim_main.cpp
-//
-//  Desktop simulator: renders the canon to a WAV file using exactly the same
-//  analyzer / timbre_model / additive_synth / score / player sources that run on
-//  the Teensy. Listening on a computer before flashing is far quicker than
-//  swapping the SD card back and forth.
-//
-//  Build and run:
-//     cd TimbreClone/tools/sim && make && ./sim <source.wav> [MODEL.BIN] [out.wav]
-// ============================================================================
-
 #include "Arduino.h"
 #include "Audio.h"
 #include "SD.h"
@@ -26,7 +14,6 @@
 #include <string>
 #include <vector>
 
-// ----------------------------------------------------------- WAV output ----
 static void writeWav(const char *path, const std::vector<int16_t> &pcm, int ch, int sr) {
   FILE *f = fopen(path, "wb");
   if (!f) { printf("無法寫入 %s\n", path); return; }
@@ -44,12 +31,6 @@ static void writeWav(const char *path, const std::vector<int16_t> &pcm, int ch, 
   printf("已寫出 %s  (%.2f 秒, %d ch)\n", path, pcm.size() / (float)(sr * ch), ch);
 }
 
-// ---------------------------------------------------------------------------
-//  train mode: run exactly the same training code as on the Teensy
-//     ./sim train MODEL.BIN note1.wav note2.wav ...
-//  Used to confirm before flashing how far on-device training will converge,
-//  much faster than waiting on the serial port.
-// ---------------------------------------------------------------------------
 static MlpWeights gOutW;
 static ProfileBank gBank;
 
@@ -85,14 +66,9 @@ static int runTrain(int argc, char **argv) {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
 int main(int argc, char **argv) {
   if (argc > 1 && strcmp(argv[1], "train") == 0) return runTrain(argc, argv);
 
-  // Usage: ./sim out.wav model.bin note1.wav [note2.wav ...]
-  //   Every source goes into the timbre bank and each note picks the closest one.
-
-  // The command line gives real paths; do not prepend the simulated SD root
   { extern std::string sim_sd_root; sim_sd_root = ""; }
 
   const char *out   = argv[1];
@@ -120,14 +96,6 @@ int main(int argc, char **argv) {
 
   printf("\n=== 3) 演奏半音階 ===\n");
 
-  // Same range rule as the firmware: the range the bank actually covers, plus one
-  // octave.
-  //
-  // This used to be missing, so the simulator always played a hard-coded C3~B4.
-  // With C4~B4 source material the simulator would transpose every note down an
-  // octave -- something the firmware never does -- and taking the simulator's
-  // result as representative of the hardware then distorts it, in the pessimistic
-  // direction.
   {
     int lo = 127, hi = 0;
     for (int i = 0; i < gBank.n; i++) {
@@ -137,13 +105,13 @@ int main(int argc, char **argv) {
     }
     if (lo <= hi) {
       scoreSetScaleRange(lo, hi + 12);
-      player.load();                       // Changing the range means the score has to be regenerated
+      player.load();
     }
   }
 
   synth.setModel(&modelObj);
   synth.setMasterGain(0.18f);
-  synth.setVibrato(50.0f, 4.8f);   // Cap and default rate; the actual depth/frequency come from the measured profile
+  synth.setVibrato(50.0f, 4.8f);
   player.begin(&synth);
   player.start(TC_BPM);
 
@@ -154,7 +122,7 @@ int main(int argc, char **argv) {
   float peak = 0.0f;
   double rmsAcc = 0.0;
 
-  while (blocks < 60 * 344) {                 // 60 s cap, as a safety net
+  while (blocks < 60 * 344) {
     sim_micros += blockUs;
     player.service();
 
@@ -172,7 +140,7 @@ int main(int argc, char **argv) {
     blocks++;
 
     if (!player.playing()) {
-      if (synth.activeVoices() == 0 && ++tailBlocks > 172) break;   // Wait another 0.5 s after the tail has rung out
+      if (synth.activeVoices() == 0 && ++tailBlocks > 172) break;
     }
   }
 

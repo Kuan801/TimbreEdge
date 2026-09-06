@@ -1,4 +1,3 @@
-// tools/sim/SD.h  -  fake an SD card with the desktop filesystem
 #pragma once
 
 #include "Arduino.h"
@@ -22,7 +21,6 @@ public:
   File(DIR *d, const std::string &path) : _dir(d), _path(path) { _isDir = true; }
   operator bool() const { return _f != nullptr || _dir != nullptr || _valid; }
 
-  // --- directory traversal (for tcSdList) ---
   bool        isDirectory() const { return _isDir; }
   const char *name() const        { return _name; }
   File        openNextFile();
@@ -62,8 +60,7 @@ public:
   bool begin(int = 0) { return true; }
   bool exists(const char *p) { struct stat st; return stat(full(p).c_str(), &st) == 0; }
   bool remove(const char *p) { return ::remove(full(p).c_str()) == 0; }
-  // The Teensy SD library has these two; the desktop adds wrappers with the same
-  // names so the sampling-folder (SETnn) code can be tested here.
+
   bool mkdir(const char *p) { return ::mkdir(full(p).c_str(), 0755) == 0; }
   bool rmdir(const char *p) { return ::rmdir(full(p).c_str()) == 0; }
   File open(const char *p, int mode = FILE_READ) {
@@ -87,23 +84,12 @@ public:
     return File(f, 0);
   }
 private:
-  // Path composition. All three cases have to come out right:
-  //   sim_sd_root = "."     ordinary simulation (cwd acts as the SD card root)
-  //   sim_sd_root = ""      tools take the real path from the command line
-  //   p is already absolute use it directly, whatever root is
-  //
-  // It used to write root + "/" + p unconditionally, so with an empty root
-  // "a.wav" became "/a.wav" and every relative path resolved to the filesystem
-  // root — the symptom being "the file is right there and still can't be found".
+
   static std::string full(const char *p) {
     if (!p || !p[0]) return sim_sd_root.empty() ? std::string(".") : sim_sd_root;
-    // empty root = a tool program: use whatever path the command line gave
-    // (relative or absolute, either is fine)
+
     if (sim_sd_root.empty()) return std::string(p);
-    // non-empty root = simulated SD card. Here a leading "/" means the SD card's
-    // root directory, not the filesystem root — it was once let through as an
-    // absolute path, and tcSdCollectSets("/") went off scanning the real
-    // filesystem root and found not a single sampling folder.
+
     return sim_sd_root + "/" + p;
   }
 };

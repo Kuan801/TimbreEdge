@@ -1,27 +1,4 @@
 #!/usr/bin/env python3
-# =============================================================================
-#  bench.py  -  multi-instrument regression benchmark
-#
-#  Usage
-#  -----
-#    python3 bench.py --lib /path/to/sound_lib --save baseline.json
-#    python3 bench.py --lib /path/to/sound_lib --compare baseline.json
-#
-#  Why this exists: when changing the synthesis code, the dangerous case is not
-#  "nothing got better", it is "one instrument got better while another quietly
-#  got worse". Looking at one instrument's numbers will never reveal that.
-#
-#  This runs the whole pipeline once per instrument (analyze -> synthesize a
-#  chromatic scale -> compare note by note) and lays the means of nine metrics
-#  out in a single table. --compare diffs every item against a previously saved
-#  baseline, marks improvements with + and regressions with -, and says so
-#  explicitly if any item falls back by more than the noise.
-#
-#  The "noise" is not guesswork: the same code run twice gives identical results
-#  (synthesis has no randomness, and training is not involved), so any non-zero
-#  difference was caused by the code. The threshold is only there to filter
-#  floating-point rounding.
-# =============================================================================
 
 import argparse
 import glob
@@ -39,14 +16,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SIM = os.path.join(HERE, "sim", "sim")
 EVAL = os.path.join(HERE, "evaluate.py")
 
-# Any difference beyond floating-point rounding counts. 1e-4 only filters the last digit's jitter.
 EPS = 1e-4
 
-# Which metrics are "bigger is better"
 HIGHER_BETTER = {"env_r", "cent_r"}
-# These metrics are ideally 0, so compare their absolute values
-ABS_METRICS = {"decay_cents", "noise_db"}
 
+ABS_METRICS = {"decay_cents", "noise_db"}
 
 def midi_of(path):
     m = re.search(r"\.([A-G][b#]?)(-?\d)\.", os.path.basename(path))
@@ -59,16 +33,15 @@ def midi_of(path):
         return None
     return 12 * (int(m.group(2)) + 1) + NOTE_NAMES.index(name)
 
-
 def run_one(name, wavs, workdir, verbose=False):
-    """Run one instrument, return the mean dict (None on failure)."""
+
     midis = sorted(x for x in (midi_of(w) for w in wavs) if x is not None)
     if not midis:
         print(f"  {name}: 檔名看不出音高，跳過")
         return None
 
     out = os.path.join(workdir, f"{name}.wav")
-    # The sim's SD emulation joins relative paths onto the root dir, so run inside the material dir
+
     src_dir = os.path.dirname(os.path.abspath(wavs[0]))
     r = subprocess.run([SIM, out, ""] + [os.path.abspath(w) for w in wavs],
                        cwd=src_dir, capture_output=True, text=True)
@@ -76,7 +49,6 @@ def run_one(name, wavs, workdir, verbose=False):
         print(f"  {name}: 合成失敗\n{r.stdout[-800:]}")
         return None
 
-    # Range rule: the timbre bank's span plus one octave up (same as the firmware and the sim)
     start, count = midis[0], (midis[-1] + 12) - midis[0] + 1
     js = os.path.join(workdir, f"{name}.json")
     e = subprocess.run([sys.executable, EVAL, out, src_dir,
@@ -92,9 +64,8 @@ def run_one(name, wavs, workdir, verbose=False):
     return {"mean": d["mean"], "n": len(d["notes"]),
             "range": f"{start}-{midis[-1]}", "notes": d["notes"]}
 
-
 def collect(lib):
-    """Return {instrument name: [wav paths...]}, single notes only."""
+
     out = {}
     for d in sorted(os.listdir(lib)):
         p = os.path.join(lib, d)
@@ -103,18 +74,16 @@ def collect(lib):
         wavs = [w for w in sorted(glob.glob(os.path.join(p, "*.wav")) +
                                   glob.glob(os.path.join(p, "*.WAV")))
                 if midi_of(w) is not None]
-        # Fewer than 3 notes is no "timbre bank", and not worth putting in the benchmark
+
         if len(wavs) >= 3:
             out[d] = wavs
     return out
 
-
 def fmt(k, v):
     return "—" if v is None else CRITERIA[k][1](v)
 
-
 def better(k, new, old):
-    """+1 if new beats old, -1 if worse, 0 if identical."""
+
     if new is None or old is None:
         return 0
     a, b = (abs(new), abs(old)) if k in ABS_METRICS else (new, old)
@@ -123,7 +92,6 @@ def better(k, new, old):
     if k in HIGHER_BETTER:
         return 1 if a > b else -1
     return 1 if a < b else -1
-
 
 def main():
     ap = argparse.ArgumentParser(description="多樂器合成品質回歸基準")
@@ -154,7 +122,6 @@ def main():
         print("沒有任何樂器跑成功", file=sys.stderr)
         sys.exit(1)
 
-    # ------------------------------------------------------- output table --
     hdr = f"{'樂器':<10}{'音數':>4}  " + "".join(f"{CRITERIA[k][0][:6]:>10}" for k in METRIC_KEYS)
     print("\n" + hdr)
     print("-" * len(hdr))
@@ -168,7 +135,6 @@ def main():
                       f, ensure_ascii=False, indent=2)
         print(f"\n已存基準：{args.save}")
 
-    # ----------------------------------------------------------- compare ---
     if args.compare:
         with open(args.compare, encoding="utf-8") as f:
             base = json.load(f)
@@ -201,7 +167,6 @@ def main():
             print("沒有任何指標退步。")
 
     print(f"\n（合成檔與逐音 JSON 都留在 {work}，要細看隨時進去）")
-
 
 if __name__ == "__main__":
     main()

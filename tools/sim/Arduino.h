@@ -1,7 +1,3 @@
-// ============================================================================
-//  tools/sim/Arduino.h  -  minimal Arduino compatibility layer for the desktop simulator
-//  Only there so the same DSP code compiles / runs on a PC; never flashed to a Teensy.
-// ============================================================================
 #pragma once
 
 #include <cstdint>
@@ -23,9 +19,6 @@ static inline void     delay(uint32_t ms) { sim_micros += (uint64_t)ms * 1000ULL
 #define LOW  0
 #define HIGH 1
 
-// Teensy's Print.h defines these macros. The simulator must define them too, or you get
-// "builds on the desktop, fails on the Teensy" -- there was once a local variable named
-// DEC that collided with Print.h's #define DEC 10, and it only surfaced at flash time.
 #define DEC 10
 #define HEX 16
 #define OCT 8

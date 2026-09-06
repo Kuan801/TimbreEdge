@@ -1,12 +1,3 @@
-// ============================================================================
-//  setdir_test  -  Creating, scanning and deleting the sample folders (SETnn)
-//
-//  This is "irreversible" code: get the numbering wrong and it overwrites the
-//  previous round's samples; delete the wrong path and it wipes out recordings the
-//  user put there. On the real hardware there is no way back, so every path is
-//  exercised first on the desktop SD simulation layer -- including things like "did
-//  something that should not be deleted survive", which only a negative test can show.
-// ============================================================================
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -39,7 +30,6 @@ static bool exists(const std::string &rel) {
 int main() {
   printf("\n採樣資料夾 SETnn\n");
 
-  // Use a clean temp directory on every run, so the real samples are never touched
   char tmpl[] = "/tmp/tc_setdir_XXXXXX";
   const char *dir = mkdtemp(tmpl);
   if (!dir) { printf("建不出暫存目錄\n"); return 1; }
@@ -47,7 +37,6 @@ int main() {
   extern std::string sim_sd_root;
   sim_sd_root = gRoot;
 
-  // -------------------------------------------------------------------------
   printf("\n1) 名稱判斷（純字串，最容易寫錯的地方）\n");
   check("SET01 是採樣資料夾",  tcIsSetDir("SET01"));
   check("SET99 是",            tcIsSetDir("SET99"));
@@ -59,7 +48,6 @@ int main() {
   check("空字串不是",               !tcIsSetDir(""));
   check("nullptr 不會爆",           !tcIsSetDir(nullptr));
 
-  // -------------------------------------------------------------------------
   printf("\n2) 編號：連號、補洞、上限\n");
   {
     char a[12], b[12], c[12];
@@ -67,22 +55,18 @@ int main() {
     check("第二次拿到 SET02", tcSdMakeNextSet(b, sizeof(b)) && strcmp(b, "SET02") == 0, b);
     check("第三次拿到 SET03", tcSdMakeNextSet(c, sizeof(c)) && strcmp(c, "SET03") == 0, c);
 
-    // Once the middle one has been deleted by hand, the next round should fill that
-    // hole instead of skipping ever upward -- otherwise the numbering gets gaps, and
-    // before long nobody can tell which set is which
     ::rmdir((gRoot + "/SET02").c_str());
     char d[12];
     check("SET02 被刪掉後，下一個補回 SET02",
           tcSdMakeNextSet(d, sizeof(d)) && strcmp(d, "SET02") == 0, d);
   }
 
-  // -------------------------------------------------------------------------
   printf("\n3) 掃描\n");
   {
-    // Drop in a few things that "look sort of like it but are not", to confirm they are not counted
+
     SD.mkdir("SETTINGS");
     SD.mkdir("SAMPLES");
-    writeFile("SET04");                 // Same name, but a file, not a directory
+    writeFile("SET04");
     writeFile("Piano.mf.C4.wav");
 
     static char sets[TC_MAX_SCAN_FILES][TC_MAX_NAME_LEN];
@@ -97,7 +81,6 @@ int main() {
                     strcmp(sets[2], "SET03") == 0);
   }
 
-  // -------------------------------------------------------------------------
   printf("\n4) 刪除\n");
   {
     writeFile("SET01/C4.WAV", 1024);
@@ -112,7 +95,6 @@ int main() {
     check("資料夾本身不見了", !exists("SET01"));
   }
 
-  // -------------------------------------------------------------------------
   printf("\n5) 負對照：不該刪的東西一個都不能少\n");
   {
     check("使用者自己的素材還在", exists("Piano.mf.C4.wav"));
@@ -122,18 +104,16 @@ int main() {
     check("其他採樣資料夾沒被波及", exists("SET02") && exists("SET03"));
   }
 
-  // -------------------------------------------------------------------------
   printf("\n6) 壞輸入不會炸\n");
   {
     check("刪不存在的資料夾回 false", !tcSdRemoveDir("SET77"));
     check("刪空字串回 false",         !tcSdRemoveDir(""));
     check("刪 nullptr 回 false",      !tcSdRemoveDir(nullptr));
-    // Point at a name that is a file, not a directory: it must never be deleted
+
     check("指到檔案時回 false",       !tcSdRemoveDir("SET04"));
     check("而且那個檔案還在",         exists("SET04"));
   }
 
-  // -------------------------------------------------------------------------
   printf("\n7) 資料夾裡的音檔仍然掃得到（n SETnn/ 要能用）\n");
   {
     writeFile("SET02/C4.WAV");

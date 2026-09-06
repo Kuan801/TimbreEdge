@@ -32,26 +32,26 @@ UiKey Buttons::poll() {
 
   for (int i = 0; i < 4; i++) {
     Btn &b = _b[i];
-    const bool raw = (digitalRead(b.pin) == LOW);      // Pull-up, so pressed is LOW
+    const bool raw = (digitalRead(b.pin) == LOW);
 
-    if (raw != b.raw) {                                // Raw state changed, restart the timer
+    if (raw != b.raw) {
       b.raw = raw;
       b.changed = now;
       continue;
     }
-    if ((now - b.changed) < TC_BTN_DEBOUNCE_MS) continue;   // Not settled yet
+    if ((now - b.changed) < TC_BTN_DEBOUNCE_MS) continue;
 
-    if (raw && !b.stable) {                            // Just pressed -> event
+    if (raw && !b.stable) {
       b.stable  = true;
       b.downAt  = now;
       b.lastRep = now;
       return b.key;
     }
-    if (!raw && b.stable) {                            // Released
+    if (!raw && b.stable) {
       b.stable = false;
       continue;
     }
-    // Held down: only up/down auto-repeat
+
     if (raw && b.stable && b.repeats &&
         (now - b.downAt) > TC_BTN_REPEAT_DELAY_MS &&
         (now - b.lastRep) > TC_BTN_REPEAT_MS) {

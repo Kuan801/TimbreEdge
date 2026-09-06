@@ -1,9 +1,6 @@
 #include "display.h"
 #include "ui.h"
 
-// ============================================================================
-//  State (maintained with or without a panel; serial diagnostics use it too)
-// ============================================================================
 static struct {
   TcState  state      = TC_ST_BOOT;
   char     detail[26] = {0};
@@ -22,7 +19,6 @@ static struct {
 
   bool     dirty      = true;
 
-  // --- Menu ---
   bool     menuOn     = false;
   char     menuTitle[26] = {0};
   char     menuRow[UI_VISIBLE_ROWS][26] = {{0}};
@@ -32,7 +28,6 @@ static struct {
 
 static uint32_t gLastDraw = 0;
 
-// ---------------------------------------------------------------------------
 static void copyStr(char *dst, size_t cap, const char *src) {
   if (!src) { dst[0] = 0; return; }
   size_t i = 0;
@@ -41,10 +36,7 @@ static void copyStr(char *dst, size_t cap, const char *src) {
 }
 
 void displaySetState(TcState s, const char *detail) {
-  // Entering any "busy" state makes the status screen push the menu aside, so
-  // the analyse/train/play/record progress bar is always visible and no flow
-  // has to remember to close the menu itself -- calls scattered around like
-  // that always end up missing one.
+
   if (s != TC_ST_IDLE && s != TC_ST_BOOT) gS.menuOn = false;
   gS.state = s;
   copyStr(gS.detail, sizeof(gS.detail), detail);
@@ -70,30 +62,10 @@ void displaySetProfileInfo(float f0, const char *noteName) {
   gS.f0 = f0; copyStr(gS.noteName, sizeof(gS.noteName), noteName); gS.dirty = true;
 }
 
-// ============================================================================
-// ---------------------------------------------------------------------------
-//  Menu state. Deliberately outside #if TC_USE_OLED -- it only writes gS and
-//  never touches a line of u8g2, so once it lives out here
-//  tools/sim/display_test.cpp can verify "the menu must not cover the status
-//  panel". When that rule breaks the screen keeps updating, so it looks nothing
-//  like a hang and eyeballing the OLED will hardly ever find it.
-// ---------------------------------------------------------------------------
 void displaySetMenu(const char *title, const char (*rows)[26], int nRows,
                     int cursorRow, int firstRow, int totalRows, bool editing) {
   if (!title) { gS.menuOn = false; gS.dirty = true; return; }
 
-  // Refuse to open the menu while busy.
-  //
-  // displaySetState() already pushes the menu aside when it enters a busy
-  // state, but that does not stop whoever calls displaySetMenu() afterwards --
-  // that is exactly how Auto sampling broke: the command switched the screen to
-  // the sampling panel, then the menu was drawn back over it at the end of the
-  // same key handler, so the panel existed too briefly to see and the level
-  // meter never appeared.
-  //
-  // Blocked here rather than only at the call sites, because the call sites
-  // keep multiplying, and "the menu must not cover the status panel" is a rule
-  // that can only be stated clearly in one place.
   if (gS.state != TC_ST_IDLE && gS.state != TC_ST_BOOT) {
     gS.menuOn = false;
     gS.dirty  = true;
@@ -131,12 +103,9 @@ void displaySetMenu(const char *title, const char (*rows)[26], int nRows,
 
 static bool gOledOk = false;
 
-// ASCII on the panel. A CJK font in U8g2 easily runs past 1 MB, and 128x64 only
-// fits two or three glyphs, so density is worse. Serial is still full Chinese.
-#define FONT_SMALL  u8g2_font_5x8_tf         // 25 chars x 8 rows
+#define FONT_SMALL  u8g2_font_5x8_tf
 #define FONT_TITLE  u8g2_font_6x12_tf
 
-// ---------------------------------------------------------------------------
 void displayScanI2C() {
   Wire.begin();
   Serial.println(F("[I2C] 掃描匯流排..."));
@@ -176,7 +145,6 @@ void displayBegin() {
   u8g2.sendBuffer();
 }
 
-// ---------------------------------------------------------------------------
 static void drawBar(int x, int y, int w, int h, float frac) {
   if (frac < 0.0f) frac = 0.0f;
   if (frac > 1.0f) frac = 1.0f;
@@ -197,21 +165,14 @@ static const char *stateName(TcState s) {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  Menu screen
-//
-//  128x64 with the 6x10 font is about 21 chars x 6 rows. Minus the title row
-//  and the bottom hint, exactly 4 rows are left -- hence UI_VISIBLE_ROWS = 4.
 static void drawMenu() {
   u8g2.clearBuffer();
   u8g2.setFont(FONT_SMALL);
 
   u8g2.drawStr(0, 0, gS.menuTitle);
-  // Top right shows "item / total", so a long scrolling list still says where you are
+
   if (gS.menuTotal > UI_VISIBLE_ROWS) {
-    // 24 bytes: two ints of at most 11 chars each, a slash, and the terminator.
-    // Menus hold a dozen items at most, but the compiler cannot know that, and
-    // sizing it big enough is more honest than adding a -Wno- flag.
+
     char pos[24];
     snprintf(pos, sizeof(pos), "%d/%d", (int)gS.menuCur + 1, (int)gS.menuTotal);
     u8g2.drawStr(128 - u8g2.getStrWidth(pos), 0, pos);
@@ -222,7 +183,7 @@ static void drawMenu() {
     const int y = 14 + i * 10;
     const bool sel = (gS.menuFirst + i) == gS.menuCur;
     if (sel) {
-      // Inverting the whole row reads better than a small arrow -- arrows are easy to miss on an OLED
+
       u8g2.drawBox(0, y - 1, 128, 10);
       u8g2.setDrawColor(0);
       u8g2.drawStr(3, y, gS.menuRow[i]);
@@ -243,17 +204,15 @@ static void draw() {
   u8g2.clearBuffer();
   u8g2.setFont(FONT_SMALL);
 
-  // ---- Title row ----------------------------------------------------------
   u8g2.drawStr(0, 0, stateName(gS.state));
   {
-    // Top right: the voice mode -- live evidence of what the canon is actually sounding with
+
     const char *mode = gS.hasModel ? "MLP" : "KEYFR";
     int w = u8g2.getStrWidth(mode);
     u8g2.drawStr(128 - w, 0, mode);
   }
   u8g2.drawHLine(0, 10, 128);
 
-  // ---- Main area ----------------------------------------------------------
   int y = 14;
   if (gS.detail[0]) { u8g2.drawStr(0, y, gS.detail); y += 9; }
 
@@ -269,7 +228,6 @@ static void draw() {
     if (gS.line[i][0]) { u8g2.drawStr(0, y, gS.line[i]); y += 9; }
   }
 
-  // ---- Bottom status bar --------------------------------------------------
   u8g2.drawHLine(0, 55, 128);
   char foot[32];
   if (gS.state == TC_ST_IDLE || gS.state == TC_ST_BOOT) {
@@ -291,7 +249,7 @@ static void draw() {
 void displayService() {
   if (!gOledOk) return;
   uint32_t now = millis();
-  if (!gS.dirty && (now - gLastDraw) < 1000) return;      // nothing changed: one heartbeat per second
+  if (!gS.dirty && (now - gLastDraw) < 1000) return;
   if ((now - gLastDraw) < TC_OLED_REFRESH_MS) return;
   gLastDraw = now;
   gS.dirty  = false;
@@ -305,8 +263,7 @@ void displayForce() {
   draw();
 }
 
-// ============================================================================
-#else   // TC_USE_OLED == 0: everything becomes an empty stub
+#else
 
 void displayBegin()   {}
 void displayScanI2C() {}

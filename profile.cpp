@@ -1,22 +1,6 @@
 #include "profile.h"
 #include <SD.h>
 
-// ============================================================================
-//  ProfileBank
-// ============================================================================
-// ---------------------------------------------------------------------------
-//  The "this doesn't look like the same instrument" check, run before storing
-//
-//  We compare against "the closest entry in the bank", not the average ——
-//  synthesis already picks the entry with the nearest pitch, and averaging gets
-//  wrecked by the piano (a piano's spread within one instrument is wider than
-//  "trumpet vs violin", since every note has its own string and hammer).
-//
-//  Say nothing while the bank holds fewer than TC_TIMBRE_WARN_MIN_REFS entries:
-//  measured false-positive rate is 9.64% with only 1 reference, 1.07% with 3.
-//  Better to say too little than to turn into noise ——
-//  a warning on every store gets ignored after the second time.
-// ---------------------------------------------------------------------------
 void ProfileBank::checkTimbreMismatch(const InstrumentProfile &np) {
   lastAddSuspect = false;
   lastAddDist    = 0.0f;
@@ -27,7 +11,7 @@ void ProfileBank::checkTimbreMismatch(const InstrumentProfile &np) {
     const float d = profileTimbreDistance(np, p[i]);
     if (d > 0.0f && d < best) best = d;
   }
-  if (best > 1e8f) return;              // Nothing to compare against (too little overlapping band)
+  if (best > 1e8f) return;
 
   lastAddDist = best;
   if (best < TC_TIMBRE_WARN_DIST) return;
@@ -47,7 +31,6 @@ bool ProfileBank::add(const InstrumentProfile &np) {
 
   checkTimbreMismatch(np);
 
-  // Same pitch (within a semitone) just overwrites, so re-analysing one file won't flood the bank
   for (int i = 0; i < n; i++) {
     if (fabsf(1200.0f * log2f(np.f0 / p[i].f0)) < 50.0f) { p[i] = np; return true; }
   }
@@ -66,47 +49,9 @@ bool ProfileBank::add(const InstrumentProfile &np) {
   return true;
 }
 
-// ---------------------------------------------------------------------------
-//  Who gets sacrificed when the bank is full
-//
-//  Old version: simply refuse. Looks safe, isn't —— load order is "sorted by
-//  filename", so out of 32 trumpet samples (E3~B5) what survived was
-//  A3 A4 A5 Ab3 Ab4 Ab5 B3 B4 B5 … the 16 that happen to sort first
-//  alphabetically, leaving E3~G3 with no material at all.
-//  Measured harmonic LSD for those notes was 12~14 dB (>8 means "audibly a
-//  different timbre"), while the mid-high register held three or four
-//  near-duplicate notes.
-//
-//  Now: count the new entry in as well, find "the most crowded pair in pitch",
-//  and sacrifice whichever of the two is the more redundant. The criterion is
-//  transposition distance —— the value of a timbre bank is that "every note
-//  finds a close enough sample", so minimise "the largest gap between
-//  neighbours".
-//
-//  Endpoints get special protection: once the lowest or highest note of the
-//  range is replaced, anything beyond it can only be reached by extrapolating a
-//  transposition, which is much worse than interpolating. So only "non-endpoint"
-//  entries are eligible to be sacrificed.
-// ---------------------------------------------------------------------------
 int ProfileBank::evictionTarget(float newF0) const {
   if (n < TC_MAX_PROFILES || newF0 <= 0.0f) return -1;
 
-  // The goal is plain: make "the largest gap between neighbours" as small as possible.
-  //
-  // That number is how far we have to transpose in the worst case —— the whole value
-  // of the timbre bank lies in "every note finds a close enough sample", so use it
-  // directly as the objective function, not some indirect proxy such as "the most
-  // crowded pair".
-  //
-  // The first version did use the indirect proxy (sacrifice whoever is most crowded
-  // against its neighbour), and the desktop test caught it thrashing straight away:
-  // the log read "349.2 Hz replaces 174.6 Hz", and 174.6 Hz was what it had taken in
-  // one step earlier. Each step looks reasonable on its own; together they go in circles.
-  //
-  // n is at most 16, so O(n^2) is only 256 comparisons; just work out the result for
-  // every candidate victim directly.
-
-  // Existing pitches (semitones, relative to A4), sorted
   float cur[TC_MAX_PROFILES];
   for (int i = 0; i < n; i++) cur[i] = 12.0f * log2f(p[i].f0 / 440.0f);
   int idx[TC_MAX_PROFILES];
@@ -120,14 +65,6 @@ int ProfileBank::evictionTarget(float newF0) const {
 
   const float ns = 12.0f * log2f(newF0 / 440.0f);
 
-  // Objective function: sum of squared gaps.
-  //
-  // Why not "largest gap": the largest gap has a broad plateau —— many candidate
-  // swaps come out with exactly the same largest gap, so "only swap on a strict
-  // improvement" gets stuck forever. Measured on 32 trumpet samples, using largest
-  // gap as the objective stalled at 6 semitones, as bad as the old version.
-  // The sum of squares has no plateau: move energy from a big gap to a small one and
-  // it drops, so every step pushes towards an even distribution.
   auto cost = [](const float *sorted, int cnt, float *outRange) {
     float sum = 0.0f;
     for (int i = 1; i < cnt; i++) {
@@ -143,16 +80,12 @@ int ProfileBank::evictionTarget(float newF0) const {
   float curRange = 0.0f;
   const float curCost = cost(sortedCur, n, &curRange);
 
-  // Is the new pitch outside the existing range? Notes beyond the range can only be
-  // extrapolated, with no sample at all to work from, which is the worst case there is
-  // —— so always take anything that widens the range, without looking at the sum of squares.
   const bool extendsRange = (ns < sortedCur[0] - 1e-4f) ||
                             (ns > sortedCur[n - 1] + 1e-4f);
 
   int   best = -1;
   float bestCost = 1e30f;
 
-  // Endpoints are exempt: replace the lowest or highest note of the range and anything beyond it can only be extrapolated.
   for (int k = 1; k < n - 1; k++) {
     const int victim = idx[k];
     float cand[TC_MAX_PROFILES + 1];
@@ -167,24 +100,19 @@ int ProfileBank::evictionTarget(float newF0) const {
     const float c = cost(cand, m, nullptr);
     if (c < bestCost) { bestCost = c; best = victim; }
   }
-  if (best < 0) return -1;                       // n <= 2, no interior points
+  if (best < 0) return -1;
 
   if (extendsRange) return best;
 
-  // Inside the range, only swap if the distribution genuinely gets more even.
-  // Equal counts as no swap, deliberately: a swap that gains nothing only makes which
-  // entry survives depend on load order, and load order is filename order —— that is
-  // handing the result over to the filenames.
   return (bestCost < curCost - 1e-4f) ? best : -1;
 }
-
 
 int ProfileBank::nearest(float f0) const {
   if (n <= 0) return -1;
   int   best = 0;
   float bd   = 1e30f;
   for (int i = 0; i < n; i++) {
-    float d = fabsf(log2f(f0 / p[i].f0));        // Distance in octaves, not a difference in Hz
+    float d = fabsf(log2f(f0 / p[i].f0));
     if (d < bd) { bd = d; best = i; }
   }
   return best;
@@ -245,7 +173,6 @@ bool bankLoad(ProfileBank &b, const char *path) {
   return b.n > 0;
 }
 
-// ============================================================================
 bool profileSave(const InstrumentProfile &p, const char *path) {
   if (SD.exists(path)) SD.remove(path);
   File f = SD.open(path, FILE_WRITE);
@@ -297,36 +224,12 @@ void profilePrint(const InstrumentProfile &p) {
   Serial.println(F("------------------------------------------"));
 }
 
-// ---------------------------------------------------------------------------
-//  Spectral envelope distance
-//
-//  Three design decisions, all of them to avoid false positives (a false positive
-//  is harder to live with than a miss —— a warning on every store gets ignored
-//  after the second time):
-//
-//  1) Compare shape only. Each side subtracts its own mean over the comparison
-//     interval before the difference is taken.
-//     A different recording level or mic gain must not read as a change of instrument.
-//
-//  2) Compare only the band "above both fundamentals". How much this one matters
-//     only showed up once it was measured:
-//     starting from 200 Hz, B5 and B4 of the same trumpet came out 17.97 dB apart ——
-//     B5 has an f0 of 1006 Hz, so 200 Hz~1 kHz holds no harmonics at all, only the
-//     noise floor, and the shape of that noise is of course nothing like the real
-//     envelope of a low note.
-//     That is not a timbre difference, it is a register difference, yet it is enough
-//     to have the warning screaming at one and the same instrument.
-//
-//  3) Cap at 8 kHz. Above that it is mostly noise, and plenty of samples were never
-//     recorded that high in the first place.
-// ---------------------------------------------------------------------------
 float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b) {
   if (!a.valid || !b.valid) return 0.0f;
 
   const float lo = logf(TC_SPECENV_FMIN), hi = logf(TC_SPECENV_FMAX);
   const float step = (hi - lo) / (TC_SPECENV_PTS - 1);
 
-  // Start a little above the higher of the two fundamentals. Below the fundamental there are no harmonics to measure.
   const float fLo = fmaxf(200.0f, 1.2f * fmaxf(a.f0, b.f0));
   const float fHi = 8000.0f;
 
@@ -342,9 +245,6 @@ float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b)
     sumB += b.specEnv[p];
   }
 
-  // Too little overlapping band and there is nothing to compare. Returning 0 means
-  // "don't know" and the caller raises no warning —— when the evidence is thin, keep
-  // quiet rather than guess.
   if (nUse < 8) return 0.0f;
 
   const float mA = sumA / nUse, mB = sumB / nUse;
@@ -356,22 +256,6 @@ float profileEnvDistance(const InstrumentProfile &a, const InstrumentProfile &b)
   return sqrtf(acc / nUse);
 }
 
-// ---------------------------------------------------------------------------
-//  Combined timbre distance
-//
-//  Each term is divided by "the typical spread within one instrument" and then
-//  squared and summed, so the output is roughly "how many times a normal
-//  pitch-to-pitch difference this is". Around 1.0 = very likely the same instrument.
-//
-//  The scales come from measured data (33 trumpet notes, 12 each for piano/violin/
-//  flute, 68 samples in all, 2278 pairings). The tool is tools/sim/envdist; rerun it
-//  when the samples change.
-//
-//  To be honest about it: only 4 instruments, and the weights are hand-set, not
-//  learned. It catches the obvious case, "winds swapped for a piano", but two
-//  instruments of similar timbre (trumpet for trombone, say) it probably cannot tell
-//  apart. This is a hint, not a verdict.
-// ---------------------------------------------------------------------------
 float profileTimbreDistance(const InstrumentProfile &a, const InstrumentProfile &b) {
   if (!a.valid || !b.valid) return 0.0f;
 
@@ -383,22 +267,15 @@ float profileTimbreDistance(const InstrumentProfile &a, const InstrumentProfile 
   float acc = 0.0f;
   int   n   = 0;
 
-  // Spectral envelope: within-instrument nearest-neighbour median 2.26 dB, take 2.5 as the scale
   const float dEnv = profileEnvDistance(a, b);
   if (dEnv > 0.0f) { acc += term(dEnv, 0.0f, 2.5f); n++; }
 
-  // Sustain decay: separates "the ones that decay" from "the ones that hold", piano 0.35 vs orchestral 0.96~1.00
   acc += term(a.sustainDecayPerSec, b.sustainDecayPerSec, 0.06f); n++;
 
-  // Inharmonicity: piano 2.3e-4, winds 2e-5. Strings sit in between and vary a lot
   acc += term(a.inharmonicity, b.inharmonicity, 6.0e-5f); n++;
 
-  // Harmonic-by-harmonic micro-ripple: violin/flute 0.10~0.13, trumpet 0.04, piano 0.00
   acc += term(a.shimmerDepth, b.shimmerDepth, 0.035f); n++;
 
-  // Brightness uses a log ratio. A brass instrument's absolute centroid barely moves
-  // with pitch, so brightness(=centroid/f0) gets smaller high up —— taking the log is
-  // what keeps that pitch dependence from reading as a timbre difference.
   if (a.brightness > 0.05f && b.brightness > 0.05f) {
     acc += term(log2f(a.brightness), log2f(b.brightness), 0.55f); n++;
   }

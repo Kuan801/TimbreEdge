@@ -1,8 +1,5 @@
 #include "recorder.h"
 
-// ============================================================================
-//  StereoCapture
-// ============================================================================
 bool StereoCapture::start(const char *path) {
   if (_active || !_qL || !_qR) return false;
   if (!_w.open(path, (uint32_t)TC_SAMPLE_RATE, 2)) return false;
@@ -13,7 +10,6 @@ bool StereoCapture::start(const char *path) {
   _fill    = 0;
   _active  = true;
 
-  // Flush whatever is left in the queues first, so left and right start aligned on the same block
   _qL->begin();
   _qR->begin();
   while (_qL->available()) { _qL->readBuffer(); _qL->freeBuffer(); }
@@ -26,7 +22,6 @@ bool StereoCapture::start(const char *path) {
 void StereoCapture::service() {
   if (!_active) return;
 
-  // Only pull when both sides have data, otherwise the channels drift apart
   while (_qL->available() > 0 && _qR->available() > 0) {
     int16_t *l = _qL->readBuffer();
     int16_t *r = _qR->readBuffer();
@@ -43,19 +38,12 @@ void StereoCapture::service() {
       _fill = 0;
     }
 
-    // Every 2 s, patch the header length up to the current point. Without this,
-    // a file left behind by a power cut mid-recording has a data length of 0 and
-    // Windows flatly calls it corrupt — even when there are already several MB
-    // of audio inside (ffmpeg and QuickTime read it, so it is easy to
-    // misdiagnose as "a Windows problem"). The cost is one seek + 8 bytes +
-    // flush every 2 s.
     if (_frames - _hdrAt >= (uint32_t)(2.0f * TC_SAMPLE_RATE)) {
       _w.flushHeader();
       _hdrAt = _frames;
     }
   }
 
-  // One side falling far behind means the SD writes are too slow; dump the excess so the channels don't stay offset for good
   while (_qL->available() > 6) { _qL->readBuffer(); _qL->freeBuffer(); _dropped++; }
   while (_qR->available() > 6) { _qR->readBuffer(); _qR->freeBuffer(); _dropped++; }
 }
@@ -76,12 +64,11 @@ void StereoCapture::stop() {
                 _dropped ? "  (有掉格，建議改用 Teensy 4.1 內建 SD 插槽)" : "");
 }
 
-// ============================================================================
 bool Recorder::start(const char *path, uint32_t seconds) {
   if (_active || !_q) return false;
 
   _target  = (uint32_t)(TC_SAMPLE_RATE * seconds);
-  // Write the correct length into the header up front, so the file stays readable even if the later fix-up fails
+
   if (!_w.open(path, (uint32_t)TC_SAMPLE_RATE, 1, _target)) return false;
   _hdrAt = 0;
 
@@ -95,9 +82,6 @@ bool Recorder::start(const char *path, uint32_t seconds) {
   return true;
 }
 
-// ============================================================================
-//  Continuous sampling: wait -> trigger -> record -> back to waiting
-// ============================================================================
 void Recorder::armSession(float threshold) {
   _session   = true;
   _thresh    = threshold;
@@ -115,7 +99,7 @@ void Recorder::armSession(float threshold) {
 
 void Recorder::endSession() {
   _session = false;
-  if (_active) {                       // aborted mid-recording
+  if (_active) {
     if (_fill) { _w.writeSamples(_buf, _fill); _fill = 0; }
     _w.close();
     _active = false;
@@ -127,9 +111,6 @@ void Recorder::endSession() {
   Serial.println(F("[SAMP] 採樣模式結束"));
 }
 
-// ---------------------------------------------------------------------------
-//  Monitor-only mode: no recording, no SD writes, just compute the input level.
-//  The quickest way to see whether the mic wiring / gain / input source is at fault.
 void Recorder::beginMonitor() {
   if (!_q) return;
   _monitor = true;
@@ -152,8 +133,7 @@ void Recorder::serviceMonitor() {
   if (!_monitor) return;
   while (_q->available() > 0) {
     int16_t *src = _q->readBuffer();
-    // One-pole low-pass coefficient: a = exp(-2π·fc/fs)
-    // 300 Hz -> 0.9578, 2 kHz -> 0.7514 (@44.1 kHz)
+
     const float A1 = 0.9578f, A2 = 0.7514f;
 
     float pk = 0.0f, sum = 0.0f, dc = 0.0f, sLo = 0.0f, sMid = 0.0f, sHi = 0.0f;
@@ -164,17 +144,16 @@ void Recorder::serviceMonitor() {
       sum += a * a;
       dc  += a;
 
-      _lp1 = A1 * _lp1 + (1.0f - A1) * a;      // < 300 Hz
-      _lp2 = A2 * _lp2 + (1.0f - A2) * a;      // < 2 kHz
+      _lp1 = A1 * _lp1 + (1.0f - A1) * a;
+      _lp2 = A2 * _lp2 + (1.0f - A2) * a;
       const float lo = _lp1;
-      const float hi = a - _lp2;               // > 2 kHz
-      const float mid = _lp2 - _lp1;           // 300 Hz ~ 2 kHz
+      const float hi = a - _lp2;
+      const float mid = _lp2 - _lp1;
       sLo += lo * lo; sMid += mid * mid; sHi += hi * hi;
     }
     _q->freeBuffer();
-    if (pk > _monPeak) _monPeak = pk;                 // peak hold, press o to reset
-    // DC = the mean of this block; AC RMS = the standard deviation after removing DC.
-    // A constant DC offset makes the total RMS look like "there is signal", but it is not sound.
+    if (pk > _monPeak) _monPeak = pk;
+
     const float mean = dc / TC_BLOCK;
     const float var  = sum / TC_BLOCK - mean * mean;
     _monDc   = _monDc   * 0.8f + mean * 0.2f;
@@ -186,23 +165,13 @@ void Recorder::serviceMonitor() {
   }
 }
 
-// Waiting state: push the data into the ring buffer while TriggerGate decides
-// whether to start recording.
-//
-// All of the decision logic lives in trigger.cpp; this only moves data — that
-// state machine is fully tested on the desktop (tools/sim/trigger_test), so
-// verifying it does not require flashing.
 void Recorder::serviceArmed() {
   const bool wasCal = _gate.calibrating();
   while (_q->available() > 0) {
     int16_t *src = _q->readBuffer();
 
-    // Use the 4th largest sample rather than the maximum — a single digital pulse
-    // should not count as someone playing.
-    // Rationale and measurements in tcBlockLevel() in trigger.h.
     const float pk = tcBlockLevel(src, TC_BLOCK);
 
-    // write into the ring pre-buffer
     memcpy(_pre + (size_t)_preHead * TC_BLOCK, src, TC_BLOCK * 2);
     _preHead = (_preHead + 1) % TC_PREROLL_BLOCKS;
     if (_preCount < TC_PREROLL_BLOCKS) _preCount++;
@@ -222,9 +191,7 @@ void Recorder::serviceArmed() {
       Serial.println(F("       ** 環境噪音比你設的下限還大。門檻已自動抬高，"
                        "但訊噪餘裕會很小 —— 建議先安靜下來或提高音量 **"));
     if (_gate.calSpikes() > 0) {
-      // The ambient estimate has already rejected them (8th largest rather than
-      // the maximum), so the threshold survives; but an isolated spike itself is
-      // usually digital coupling or a grounding problem, and should not pass silently.
+
       Serial.printf("       校正期間有 %d 個孤立尖峰（遠高於環境噪音）。"
                     "門檻沒有被它們影響，\n"
                     "       但那通常是數位耦合／接地問題 —— 麥克風線離 SD 卡與"
@@ -233,7 +200,6 @@ void Recorder::serviceArmed() {
   }
 }
 
-// After the trigger: dump the pre-buffer into the file first, then keep recording
 bool Recorder::startFromTrigger() {
   _target = (uint32_t)(TC_SAMPLE_RATE * TC_REC_SECONDS);
   if (!_w.open(TC_REC_PATH, (uint32_t)TC_SAMPLE_RATE, 1, _target)) return false;
@@ -244,7 +210,6 @@ bool Recorder::startFromTrigger() {
   _peak    = 0.0f;
   _active  = true;
 
-  // Drain the pre-buffer in ring order (oldest first)
   int start = (_preHead - _preCount + TC_PREROLL_BLOCKS) % TC_PREROLL_BLOCKS;
   for (int b = 0; b < _preCount; b++) {
     int idx = (start + b) % TC_PREROLL_BLOCKS;
@@ -267,7 +232,6 @@ bool Recorder::service() {
     memcpy(_buf + _fill, src, TC_BLOCK * 2);
     _q->freeBuffer();
 
-    // Track the peak while we are at it, so afterwards we can tell the user whether the level was enough
     for (int i = 0; i < TC_BLOCK; i++) {
       float a = fabsf(_buf[_fill + i] * (1.0f / 32768.0f));
       if (a > _peak) _peak = a;
@@ -279,7 +243,7 @@ bool Recorder::service() {
       _fill = 0;
     }
     _written += TC_BLOCK;
-    // Same as StereoCapture: a power cut mid-recording must still leave a playable file
+
     if (_written - _hdrAt >= (uint32_t)(2.0f * TC_SAMPLE_RATE)) {
       _w.flushHeader();
       _hdrAt = _written;
@@ -290,7 +254,7 @@ bool Recorder::service() {
 
   if (_written >= _target) {
     if (_fill) { _w.writeSamples(_buf, _fill); _fill = 0; }
-    if (!_session) {                       // Only a one-shot recording closes the queues; sampling mode keeps listening
+    if (!_session) {
       _q->end();
       while (_q->available() > 0) { _q->readBuffer(); _q->freeBuffer(); }
     }

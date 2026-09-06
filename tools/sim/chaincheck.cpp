@@ -1,40 +1,3 @@
-// ============================================================================
-//  chaincheck.cpp  -  measure the frequency response of the recording chain
-//
-//  Usage:  ./chaincheck reference.wav recorded.wav [reference2 recorded2 ...]
-//
-//  The two files must be "the same note": the reference is the clean source,
-//  the recorded file is that same note captured through your microphone,
-//  cabling and SGTL5000.
-//
-//  --- Why this tool is needed -----------------------------------------------
-//
-//  Measurements showed that on a mic-recorded piano C4 the 4th harmonic is
-//  20 dB stronger than the fundamental; on the reference material for the same
-//  note the fundamental is 22 dB stronger than the 4th -- a gap of 42 dB.
-//  In other words, the fundamental is all but absent from what we record.
-//
-//  The synth only faithfully reproduces the material it is handed, so this
-//  cannot be fixed on the synthesis side. But it is also not a vague "sounds
-//  a bit off" -- it is a curve you can actually measure. With numbers you can
-//  move the microphone around and watch whether it improves, instead of
-//  trying things by feel.
-//
-//  --- How to use it ---------------------------------------------------------
-//
-//  1. Pick a clean reference note (e.g. Piano.mf.C4.wav)
-//  2. Record the same note the way you actually record
-//  3. Run this tool and look at the relative gain of each band
-//
-//  Ideally every band comes out near 0 dB (a flat recording chain).
-//  Very negative lows = the low end is being eaten; very positive mid/highs =
-//  a resonance, or the source itself has no low end.
-//
-//  Give it several pairs (different pitches) and they are pooled, because a
-//  single note's result is coloured by that note's own harmonic structure --
-//  only after averaging over several pitches does the recording chain's own
-//  character show through.
-// ============================================================================
 #include <Arduino.h>
 #include <Audio.h>
 #include <cstdio>
@@ -49,18 +12,16 @@
 #include "../../profile.h"
 #include "../../analyzer.h"
 
-// Bands one octave wide. The low bands show the problem most clearly.
 static const float kBandLo[] = { 60, 125, 250, 500, 1000, 2000, 4000, 8000 };
 static const int   kNBand    = (int)(sizeof(kBandLo) / sizeof(kBandLo[0]));
 
 struct Res { float db[8]; bool has[8]; };
 
-// Measure one file's harmonic amplitudes (dB, its own peak taken as 0)
 static bool harmDb(const char *path, float *outDb, float *outF0, int nh = 24) {
   InstrumentProfile p;
   if (!analyzeWavFile(path, p, nullptr, nullptr)) return false;
   *outF0 = p.f0;
-  // Use the sustain keyframe as the representative (avoids the attack transient)
+
   const float *kf = p.keyframe[TC_N_KEYFRAME / 2];
   float mx = 0.0f;
   for (int h = 0; h < nh && h < TC_N_HARM; h++) if (kf[h] > mx) mx = kf[h];
@@ -88,7 +49,6 @@ int main(int argc, char **argv) {
     if (!harmDb(argv[i], refDb, &f0r)) { printf("  ! 讀不到 %s\n", argv[i]); continue; }
     if (!harmDb(argv[i + 1], recDb, &f0c)) { printf("  ! 讀不到 %s\n", argv[i + 1]); continue; }
 
-    // Too far apart in pitch means it is not the same note; no point comparing
     const float cents = 1200.0f * log2f(f0c / f0r);
     if (fabsf(cents) > 60.0f) {
       printf("  ! 這一組的音高差 %.0f cents，不是同一個音，跳過\n", cents);
@@ -109,7 +69,6 @@ int main(int argc, char **argv) {
 
   printf("\n=== 錄音鏈頻率響應（%d 組配對）===\n\n", pairs);
 
-  // Take the lowest valid band as the 0 dB reference: we are after the tilt, not absolute gain
   float base = 0.0f;
   bool haveBase = false;
   Res r{};
@@ -117,7 +76,7 @@ int main(int argc, char **argv) {
     r.has[b] = acc[b].size() >= 2;
     if (!r.has[b]) continue;
     std::sort(acc[b].begin(), acc[b].end());
-    r.db[b] = acc[b][acc[b].size() / 2];          // Median; more robust than the mean
+    r.db[b] = acc[b][acc[b].size() / 2];
     if (!haveBase) { base = r.db[b]; haveBase = true; }
   }
 
@@ -129,7 +88,7 @@ int main(int argc, char **argv) {
                             (b + 1 < kNBand) ? kBandLo[b + 1] : 16000.0f, "—"); continue; }
     const float v = r.db[b] - base;
     if (fabsf(v) > fabsf(worst)) worst = v;
-    // Simple bar chart, one cell = 3 dB
+
     char bar[42] = {0};
     int n = (int)(fabsf(v) / 3.0f);
     if (n > 20) n = 20;

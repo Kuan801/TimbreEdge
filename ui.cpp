@@ -3,7 +3,6 @@
 
 Ui gUi;
 
-// ---------------------------------------------------------------------------
 void Ui::begin(const UiPage *pages, uint8_t nPages) {
   _pages = pages;
   _nPages = nPages;
@@ -33,7 +32,6 @@ uint8_t Ui::rowCount() const {
   return _pages[_page].n;
 }
 
-// Keep the cursor inside the visible window at all times
 void Ui::clampScroll() {
   if (_cursor < _top) _top = _cursor;
   if (_cursor >= _top + UI_VISIBLE_ROWS) _top = _cursor - (UI_VISIBLE_ROWS - 1);
@@ -50,23 +48,19 @@ void Ui::rowText(uint8_t row, char *out, size_t cap) const {
   const UiItem &it = p.items[row];
 
   if (it.kind == UI_ADJUST && it.value) {
-    // Wrap the item being edited in [ ] so it is obvious what up/down is changing
+
     const bool ed = (_editing && row == _cursor);
     snprintf(out, cap, ed ? "%s [%d]" : "%s %d", it.label, (int)*it.value);
   } else if (it.kind == UI_PAGE) {
-    snprintf(out, cap, "%s", it.label);      // The submenu arrow is left to the drawing side
+    snprintf(out, cap, "%s", it.label);
   } else {
     snprintf(out, cap, "%s", it.label);
   }
 }
 
-// ---------------------------------------------------------------------------
 const char *Ui::feed(UiKey k) {
   if (!_pages || k == UI_KEY_NONE) return nullptr;
 
-  // While a status screen owns the display (playing, sampling, ...), only BACK
-  // does anything: it wakes the menu. Every other key is left to that mode, so
-  // the menu cannot be opened by accident in the middle of a performance.
   if (_suspended) {
     if (k == UI_KEY_BACK) _suspended = false;
     return nullptr;
@@ -74,16 +68,13 @@ const char *Ui::feed(UiKey k) {
 
   const UiPage &p = _pages[_page];
 
-  // ---- value editing mode ------------------------------------------------
   if (_editing) {
     const UiItem *it = cur();
     if (!it || it->kind != UI_ADJUST || !it->value) { _editing = false; return nullptr; }
 
     if (k == UI_KEY_OK || k == UI_KEY_BACK) {
       _editing = false;
-      // Send the command only on exit: sending on every press would flood the
-      // log for something like micGain, and the intermediate values are
-      // meaningless anyway.
+
       snprintf(_cmdBuf, sizeof(_cmdBuf), it->cmd ? it->cmd : "", (int)*it->value);
       return _cmdBuf;
     }
@@ -96,7 +87,6 @@ const char *Ui::feed(UiKey k) {
     return nullptr;
   }
 
-  // ---- ordinary navigation -----------------------------------------------
   switch (k) {
     case UI_KEY_UP:
       if (p.n) _cursor = (_cursor == 0) ? (uint8_t)(p.n - 1) : (uint8_t)(_cursor - 1);
@@ -137,7 +127,6 @@ const char *Ui::feed(UiKey k) {
 
       if (it->kind == UI_ADJUST) { _editing = true; return nullptr; }
 
-      // UI_CMD
       if (!it->cmd) return nullptr;
       snprintf(_cmdBuf, sizeof(_cmdBuf), "%s", it->cmd);
       return _cmdBuf;

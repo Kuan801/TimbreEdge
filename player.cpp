@@ -5,9 +5,6 @@ void Player::begin(AudioSynthAdditive *synth) {
   load();
 }
 
-// Rebuild the score. The range follows the timbre bank, so it has to be
-// reloaded before every performance. Switching mid-performance stops first,
-// otherwise _cursor would point at the wrong place in the new score.
 void Player::load() {
   if (_playing) stop();
   _n          = buildScore(_notes, TC_MAX_NOTES);
@@ -27,7 +24,7 @@ void Player::start(float bpm) {
 
   Serial.printf("[PLAY] 開始演奏，%.0f BPM，約 %.1f 秒\n",
                 bpm, _totalTicks * _tickUs / 1e6f);
-  fireTick();                                  // Notes at tick 0 go out immediately
+  fireTick();
 }
 
 void Player::stop() {
@@ -41,24 +38,24 @@ void Player::scheduleOff(uint16_t offTick, uint8_t midi) {
   for (unsigned i = 0; i < sizeof(_pend) / sizeof(_pend[0]); i++) {
     if (!_pend[i].used) { _pend[i] = {offTick, midi, true}; return; }
   }
-  // Schedule full (should not happen): just let the oldest one go
+
   _synth->noteOff((float)_pend[0].midi);
   _pend[0] = {offTick, midi, true};
 }
 
 void Player::fireTick() {
-  // 1) note-off first, so repeated notes at the same pitch don't kill each other
+
   for (unsigned i = 0; i < sizeof(_pend) / sizeof(_pend[0]); i++) {
     if (_pend[i].used && _pend[i].offTick <= _tick) {
       _synth->noteOff((float)_pend[i].midi);
       _pend[i].used = false;
     }
   }
-  // 2) then note-on
+
   while (_cursor < _n && _notes[_cursor].tick == _tick) {
     const ScoreNote &sn = _notes[_cursor];
     float pan = (sn.part == 0) ? 0.62f : (sn.part == 1 ? 0.38f : 0.50f);
-    // Spread the inner voices slightly left and right for a wider sound
+
     if (sn.part == 1) pan = (sn.midi % 2) ? 0.32f : 0.68f;
     _synth->noteOn((float)sn.midi, sn.vel / 127.0f, pan);
     scheduleOff((uint16_t)(sn.tick + sn.dur), sn.midi);

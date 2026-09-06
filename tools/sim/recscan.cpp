@@ -1,16 +1,3 @@
-// ============================================================================
-//  recscan  -  throw a pile of WAVs at it and see what verdict the device gives
-//
-//  Purpose: after changing a threshold in rec_check.cpp, run real material
-//  through it once before flashing.
-//  reccheck_test checks the rules themselves (given these numbers, is the
-//  verdict right); this one checks what comes out when "the numbers the
-//  analyzer measures" are wired to "the rules" -- two different things.
-//
-//  Usage:
-//    ./recscan clean-material/*.wav    <- should all be ok
-//    ./recscan mic-takes/*.WAV         <- the bad takes should get caught
-// ============================================================================
 #include "../../analyzer.h"
 #include "../../profile.h"
 #include "../../rec_check.h"
@@ -28,9 +15,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // The desktop SD emulation prepends a root directory to paths by default
-  // (emulating the SD card's "/"). This tool takes real paths off the command
-  // line, so clear it.
   extern std::string sim_sd_root;
   sim_sd_root = "";
 
@@ -59,7 +43,6 @@ int main(int argc, char **argv) {
     else if (v == REC_WARN) nWarn++;
     else                    nBad++;
 
-    // Basename only; long paths blow the table apart
     const char *base = strrchr(argv[i], '/');
     base = base ? base + 1 : argv[i];
 
@@ -73,7 +56,7 @@ int main(int argc, char **argv) {
     if (recCheckSnrKnown(rc.noiseFloor))
       snprintf(snr, sizeof(snr), "%.0f", recCheckSnrDb(rc.noiseFloor));
     else
-      snprintf(snr, sizeof(snr), "--");      // Attack sits in bin 0, so there is no noise floor to measure
+      snprintf(snr, sizeof(snr), "--");
 
     printf("%-28.28s %-6s %5s %6.3f %5s %3d %5.2f %5.2f  %s / %s\n",
            base,

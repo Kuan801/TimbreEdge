@@ -1,20 +1,3 @@
-// ============================================================================
-//  bank_test.cpp  -  the timbre bank's admission rules and the "instrument changed" warning
-//
-//  Usage:  make bank_test && ./bank_test
-//
-//  The thresholds themselves were measured on real material (see the comments in
-//  config.h and tools/sim/envdist); what is verified here is that the mechanism is
-//  right:
-//    - same pitch overwrites, different pitch accumulates
-//    - refuse once full
-//    - stay quiet while there are not enough reference entries
-//    - speak up only on a big difference, stay silent when it is close
-//
-//  Synthetic profiles rather than real WAVs, so this test does not depend on
-//  material files -- they live on the user's desktop, and on another machine it
-//  would not run at all.
-// ============================================================================
 #include "Arduino.h"
 #include "../../profile.h"
 #include <cstdio>
@@ -26,8 +9,6 @@ static void check(const char *what, bool ok) {
   if (!ok) gFail++;
 }
 
-// Build a profile. rolloff sets the slope of the spectral envelope; decay/inharm/shimmer
-// are the ones that really separate instruments (measured: piano 0.35/2.3e-4/0.00, winds 0.96/2e-5/0.04~0.10)
 static InstrumentProfile mk(float f0, float rolloff, float decay,
                             float inharm, float shimmer, float bright) {
   InstrumentProfile p{};
@@ -49,9 +30,8 @@ static InstrumentProfile mk(float f0, float rolloff, float decay,
   return p;
 }
 
-// "different pitches of the same wind instrument"
 static InstrumentProfile wind(float f0)  { return mk(f0, 6.0f, 0.96f, 2.0e-5f, 0.05f, 4.0f); }
-// "piano": fast decay, high inharmonicity, almost no shimmer
+
 static InstrumentProfile piano(float f0) { return mk(f0, 9.0f, 0.35f, 2.3e-4f, 0.00f, 2.2f); }
 
 int main() {
@@ -60,12 +40,12 @@ int main() {
   printf("1) 同音高覆蓋、不同音高累加\n");
   {
     ProfileBank b;
-    b.add(wind(261.6f));                       // C4
+    b.add(wind(261.6f));
     check("加入第一組後 n=1", b.n == 1);
-    b.add(wind(293.7f));                       // D4
+    b.add(wind(293.7f));
     check("不同音高會累加，n=2", b.n == 2);
-    InstrumentProfile again = wind(262.5f);    // less than a semitone from C4
-    again.brightness = 9.9f;                   // A marker, to confirm it really was replaced
+    InstrumentProfile again = wind(262.5f);
+    again.brightness = 9.9f;
     b.add(again);
     check("半音以內視為同一個音，n 不變", b.n == 2);
     bool replaced = false;
@@ -75,20 +55,7 @@ int main() {
 
   printf("\n2) 滿了之後：只換掉冗餘的，不會無腦踢最舊的\n");
   {
-    // This section used to assert "return false once full". That contract has
-    // changed -- refusing looks safe, but it really hands the outcome to filename
-    // sorting: of 32 trumpet samples the 16 kept were the alphabetically first ones,
-    // all of E3~G3 had no material at all, and those notes measured 12~14 dB
-    // harmonic LSD. The eviction logic itself is tested thoroughly in evict_test;
-    // what is guarded here is only the invariants: capacity must not be blown, the
-    // endpoints must not disappear.
-    // Spacing has to be even in *semitones*, not even in Hz.
-    //
-    // The first version used 200 + i*40 Hz and the test caught it immediately: that
-    // is not remotely even in log pitch (200->240 is 3.16 semitones, 760->800 only
-    // 0.89), so slipping in another pitch down in the low register really did make
-    // the distribution more even -- the code was right to judge it "worth swapping",
-    // it was my premise that was wrong.
+
     ProfileBank b;
     for (int i = 0; i < TC_MAX_PROFILES; i++)
       b.add(wind(200.0f * powf(2.0f, i / 12.0f)));
@@ -96,12 +63,11 @@ int main() {
 
     const float loF0 = b.p[0].f0;
     const float hiF0 = b.p[TC_MAX_PROFILES - 1].f0;
-    // Already even in semitones: another pitch inside the range would only leave one stretch at 2 semitones -> refused
+
     const bool ok = b.add(wind(200.0f * powf(2.0f, 0.5f / 12.0f)));
     check("範圍內、無助於分佈的音高仍然拒收", !ok);
     check("n 永遠不超過 TC_MAX_PROFILES", b.n == TC_MAX_PROFILES);
 
-    // A pitch that widens the range must be taken, but not at the cost of an endpoint
     b.add(wind(3000.0f));
     check("擴大音域之後 n 仍然是上限", b.n == TC_MAX_PROFILES);
     bool loKept = false, hiKept = false, newIn = false;
@@ -117,13 +83,11 @@ int main() {
 
   printf("\n3) 換樂器警告：參考組數不足時不開口\n");
   {
-    // Measured: with only 1 reference entry the false alarm rate is 9.64%, and it
-    // takes 3 to get down to 1.07%. Better to say less -- a warning on every
-    // admission gets ignored after the second sighting.
+
     ProfileBank b;
     for (int i = 0; i < TC_TIMBRE_WARN_MIN_REFS - 1; i++)
       b.add(wind(261.6f + i * 40.0f));
-    b.add(piano(392.0f));                      // clearly a different instrument
+    b.add(piano(392.0f));
     check("庫裡不足 3 組時，再怎麼不像也不出聲", !b.lastAddSuspect);
   }
 
@@ -155,7 +119,7 @@ int main() {
     b.clear();
     check("clear 之後 n 歸零", b.n == 0);
     check("clear 之後警告狀態也歸零", !b.lastAddSuspect && b.lastAddDist == 0.0f);
-    // After a clear and a fresh start, the first few notes must not still be carrying the previous run's warning
+
     b.add(piano(261.6f));
     check("清空後加入第一個音不出聲", !b.lastAddSuspect);
   }

@@ -1,32 +1,4 @@
 #!/usr/bin/env python3
-# =============================================================================
-#  evaluate.py  -  objective comparison: synth scale vs. original single notes
-#
-#  Usage
-#  -----
-#    python3 evaluate.py SCALE.WAV  /path/to/Piano.mf.*.wav
-#    python3 evaluate.py SCALE.WAV  samples/ --plot report.png --json report.json
-#
-#  SCALE.WAV is the firmware's recording of the chromatic scale (press w to save
-#  it as PLAY.WAV, or produce one with the simulator). Sample filenames have to
-#  show the note name (C4 / Db4 / A4 ...); pairing is automatic.
-#
-#  Now that the range is no longer hard-coded C3~B4 but "bank range + one
-#  octave", --start has to be given too: with C4~B4 material the synthesised
-#  file is C4~B5, so --start 60 --count 24.
-#
-#  Five metrics, all "smaller is better" except the correlations
-#  -------------------------------------------------------------
-#   1. envelope correlation  Pearson r, compared in the log domain (ears are log)
-#   2. decay time error      ratio of the times to fall -20 dB, given in cents
-#   3. harmonic LSD          log-spectral distance (dB), -45 dB floor so zeros can't blow it up
-#   4. spectrogram distance  mean absolute difference over mel band × time (dB)
-#   5. centroid correlation  does brightness move the right way over time
-#
-#  Why the floor and the alignment:
-#    computed raw, LSD is dragged to hundreds of dB by "high harmonics whose
-#    true value is 0"; without aligning the onsets every time-based metric warps.
-# =============================================================================
 
 import argparse
 import glob
@@ -39,24 +11,10 @@ import numpy as np
 
 SR = 44100
 
-# Below this log-domain std of the reference envelope, envelope correlation is not reported (see compare_note)
 ENV_FLAT_STD_DB = 3.0
 NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
 ALT = {"C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb"}
 
-
-# =============================================================================
-#  Interpretation criteria
-#
-#  The report generator (report_docx.py) imports this table directly -- do not
-#  keep a second copy. Two copies means "the threshold was changed on one side
-#  only" while the colours and conclusions in the report stay as they were --
-#  that kind of error shows no symptom at all, it just quietly makes the report
-#  wrong.
-#
-#    key       -> (display name, formatter, good, acceptable, one-line note)
-#  "good" and "acceptable" are both lambdas; True means the value is in that band.
-# =============================================================================
 CRITERIA = {
     "env_r": ("包絡相關性 r", lambda v: f"{v:.3f}",
               lambda v: v > 0.95, lambda v: v > 0.85,
@@ -87,16 +45,13 @@ CRITERIA = {
 }
 METRIC_KEYS = list(CRITERIA)
 
-
 def grade(key, v):
-    """Return 'good' / 'ok' / 'bad' / 'na'."""
+
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return "na"
     _, _, good, ok, _ = CRITERIA[key]
     return "good" if good(v) else ("ok" if ok(v) else "bad")
 
-
-# ----------------------------------------------------------------- I/O -----
 def read_wav(path):
     with wave.open(path, "rb") as w:
         sr, n, ch, sw = w.getframerate(), w.getnframes(), w.getnchannels(), w.getsampwidth()
@@ -111,9 +66,8 @@ def read_wav(path):
         x = np.interp(np.arange(0, t[-1], 1 / SR), t, x)
     return x
 
-
 def midi_of_filename(path):
-    """Pull the MIDI pitch out of a filename like Piano.mf.Db4.wav."""
+
     base = os.path.basename(path)
     m = re.search(r"\.([A-G][b#]?)(-?\d)\.", base) or re.search(r"([A-G][b#]?)(-?\d)", base)
     if not m:
@@ -124,17 +78,13 @@ def midi_of_filename(path):
         return None
     return 12 * (octv + 1) + NOTE_NAMES.index(name)
 
-
 def midi_name(m):
     return f"{NOTE_NAMES[m % 12]}{m // 12 - 1}"
 
-
-# -------------------------------------------------- basic measurements -----
 def envelope(x, hop=0.005):
     k = int(hop * SR)
     n = (len(x) - k) // k
     return np.array([np.sqrt(np.mean(x[i * k:i * k + k] ** 2)) for i in range(max(n, 1))])
-
 
 def find_onset(e, thresh=0.08):
     m = e.max()
@@ -143,9 +93,8 @@ def find_onset(e, thresh=0.08):
     idx = np.where(e > thresh * m)[0]
     return int(idx[0]) if len(idx) else 0
 
-
 def decay_time_db(e, db=20.0):
-    """Seconds to fall db decibels from the peak (hop 0.005s). Returns nan if it never does."""
+
     if e.max() <= 0:
         return np.nan
     pk = int(np.argmax(e))
@@ -155,22 +104,8 @@ def decay_time_db(e, db=20.0):
             return (i - pk) * 0.005
     return np.nan
 
-
 def refine_f0(x, f0_nom, t0, N=8192, tol=0.06):
-    """Pin down f0 from the signal's own spectrum instead of trusting equal temperament.
 
-    Why this is needed: real playing is off pitch. A measured trumpet B5
-    recording has a fundamental of 1006.5 Hz, 32 cents above equal
-    temperament's 987.8. harmonic_dist used to sample at h*f0_nom with a search
-    window of only +-27 Hz, so by the 2nd harmonic it was already 37 Hz out --
-    it measured the valleys between harmonics rather than the peaks, and the
-    whole harmonic distribution came out wrong. That leaves the conclusion "high
-    notes synthesise badly" with no ground to stand on (what was wrong was the
-    ruler).
-
-    Method: find the strongest peak within +-6% of f0_nom, then parabolic
-    interpolation for sub-bin precision.
-    """
     a = int(t0 * SR)
     s = x[a:a + N]
     if len(s) < N:
@@ -183,12 +118,11 @@ def refine_f0(x, f0_nom, t0, N=8192, tol=0.06):
     if hi <= lo:
         return f0_nom
     k = lo + int(np.argmax(mag[lo:hi + 1]))
-    # parabolic interpolation, for sub-bin precision
+
     y0, y1, y2 = mag[k - 1], mag[k], mag[k + 1]
     den = 2 * (2 * y1 - y0 - y2)
     d = (y2 - y0) / den if abs(den) > 1e-12 else 0.0
     return float((k + d) * SR / N)
-
 
 def harmonic_dist(x, f0, t0, n=24, N=8192):
     a = int(t0 * SR)
@@ -208,16 +142,13 @@ def harmonic_dist(x, f0, t0, n=24, N=8192):
     a = np.array(out)
     return a / max(a.sum(), 1e-12)
 
-
 def lsd(a, b, floor_db=-45.0):
-    """Log-spectral distance. Floor both sides, or harmonics whose true value is 0 drag the metric to hundreds of dB."""
+
     A = np.maximum(20 * np.log10(a + 1e-12), floor_db)
     B = np.maximum(20 * np.log10(b + 1e-12), floor_db)
     return float(np.sqrt(np.mean((A - B) ** 2)))
 
-
 MEL_FLOOR_DB = -30.0
-
 
 def mel_spectrogram(x, n_mels=48, N=2048, hop=512, fmin=50, fmax=16000, dur=2.0):
     x = x[:int(dur * SR)]
@@ -227,7 +158,7 @@ def mel_spectrogram(x, n_mels=48, N=2048, hop=512, fmin=50, fmax=16000, dur=2.0)
     w = np.hanning(N)
     S = np.array([np.abs(np.fft.rfft(x[i * hop:i * hop + N] * w)) for i in range(nfr)])
     fr = np.fft.rfftfreq(N, 1 / SR)
-    # triangular filterbank on a log frequency axis
+
     edges = np.exp(np.linspace(np.log(fmin), np.log(fmax), n_mels + 2))
     M = np.zeros((n_mels, len(fr)))
     for i in range(n_mels):
@@ -238,12 +169,8 @@ def mel_spectrogram(x, n_mels=48, N=2048, hop=512, fmin=50, fmax=16000, dur=2.0)
         M[i, right] = (hi - fr[right]) / max(hi - ce, 1e-9)
     return 20 * np.log10(S @ M.T + 1e-9)
 
-
 def centroid_track(x, N=4096, hop=1024, dur=2.0):
-    """Return (centroid track, per-frame energy). The energy comes back too because
-    the centroid has to be energy-weighted -- in a quiet stretch any noise floor
-    pushes the centroid way up. Measured on a violin crescendo sample: equal
-    weighting gives 1433 Hz, energy weighting 414 Hz, a factor of 3.5."""
+
     x = x[:int(dur * SR)]
     if len(x) < N:
         x = np.pad(x, (0, N - len(x)))
@@ -256,7 +183,6 @@ def centroid_track(x, N=4096, hop=1024, dur=2.0):
         eng.append(e)
     return np.array(cen), np.array(eng)
 
-
 def pearson(a, b):
     n = min(len(a), len(b))
     a, b = a[:n], b[:n]
@@ -264,11 +190,9 @@ def pearson(a, b):
         return np.nan
     return float(np.corrcoef(a, b)[0, 1])
 
-
-# ------------------------------ slicing single notes out of the scale -----
 def split_scale(x, n_notes=24, bpm=66.0, ticks_per_note=8, ticks_per_beat=4,
                 start_midi=48):
-    """Cut by score timing. Returns [(midi, samples of that note), ...]"""
+
     tick = 60.0 / bpm / ticks_per_beat
     dur = ticks_per_note * tick
     out = []
@@ -280,19 +204,8 @@ def split_scale(x, n_notes=24, bpm=66.0, ticks_per_note=8, ticks_per_beat=4,
         out.append((start_midi + i, x[a:min(b, len(x))]))
     return out
 
-
-# ================================================================== main ====
 def aperiodic(x, f0, t0=0.4, dur=1.2):
-    """Aperiodic (noise) component: x[n] - x[n-T]. T is one fundamental period.
-    Returns (fraction of the total energy, distribution % of the residual over 4 bands).
 
-    Why measure it: a real instrument's breath noise, bow noise and string
-    knocks all live here, but they sit at roughly -70 dB, where none of harmonic
-    LSD, spectrogram MAE and centroid can see them. Measured on flute: the
-    synthesis side's noise layer was once a full 27 dB short (an energy ratio
-    used as an amplitude ratio), so it sounded like an organ rather than a
-    flute, and not one of those metrics reacted -- a textbook blind spot.
-    """
     k = int(0.01 * SR)
     e = np.array([np.sqrt(np.mean(x[i:i + k] ** 2)) for i in range(0, max(len(x) - k, 1), k)])
     if e.max() <= 0:
@@ -311,56 +224,32 @@ def aperiodic(x, f0, t0=0.4, dur=1.2):
     dist = np.array([m[(fr >= lo) & (fr < hi)].sum() for lo, hi in bands])
     return frac, dist / max(dist.sum(), 1e-15) * 100.0
 
-
 def compare_note(syn, ref, f0):
-    """Return every metric for this note. Both sides are first aligned to their own onset."""
+
     es, er = envelope(syn), envelope(ref)
     os_, or_ = find_onset(es), find_onset(er)
     syn_a, ref_a = syn[os_ * int(0.005 * SR):], ref[or_ * int(0.005 * SR):]
     es_a, er_a = envelope(syn_a), envelope(ref_a)
 
-    # A sustained instrument's recording (bowed strings, winds) ends with the
-    # player stopping, but the synth plays for the MIDI note length and should
-    # not stop by itself. Comparing the whole span gives the false conclusion
-    # "the envelopes are completely uncorrelated" (measured violin r = -0.006,
-    # while the spectrum is actually fine). So sustained types are compared only
-    # up to the end of the reference material's body; only decaying types get the
-    # whole span.
     body_end = len(er_a)
     hi = np.where(er_a >= 0.6 * er_a.max())[0]
     if len(hi) > 1:
         body_frac = (hi[-1] - hi[0]) / max(len(er_a), 1)
-        if body_frac >= 0.25:                    # sustained
+        if body_frac >= 0.25:
             body_end = int(hi[-1])
 
     n = min(len(es_a), len(er_a), body_end, int(2.0 / 0.005))
     if n < 20:
         return None
-    # Compare the envelopes in the log domain: ears are logarithmic, and the linear domain is dominated by the attack
+
     ls = 20 * np.log10(es_a[:n] / max(es_a.max(), 1e-12) + 1e-6)
     lr = 20 * np.log10(er_a[:n] / max(er_a.max(), 1e-12) + 1e-6)
 
-    # Once the reference envelope is flat enough, the correlation coefficient
-    # measures noise, not shape.
-    #
-    # Measured log-envelope standard deviation inside the compared window:
-    #     piano 7~10 dB     violin 12~26 dB      flute 2.0~2.1 dB     trumpet 2.1 dB
-    # Flute and trumpet are nearly flat in that window (a sustained tone is
-    # supposed to be flat), and the Pearson r of two near-horizontal curves is
-    # decided entirely by the random wobble of vibrato and breath noise --
-    # exactly what the synth neither should nor can reproduce point by point.
-    # Measured on the same material with one completely unrelated parameter
-    # changed, the flute's r jumps around anywhere between 0.0 and 0.9.
-    #
-    # So when it is too flat to measure shape, report "not measurable" rather
-    # than handing back noise that looks like a score.
-    # Threshold 3 dB: the four instruments above sit well clear of that line.
     env_r_val = pearson(ls, lr) if np.std(lr) >= ENV_FLAT_STD_DB else np.nan
 
     ds, dr = decay_time_db(es_a), decay_time_db(er_a)
     decay_cents = (1200 * np.log2(ds / dr)) if (ds and dr and not np.isnan(ds) and not np.isnan(dr)) else np.nan
 
-    # Pin down f0 on each side before taking harmonics, or off-pitch playing throws the whole comparison out of place
     f0_ref = refine_f0(ref_a, f0, 0.3)
     f0_syn = refine_f0(syn_a, f0, 0.3)
     hl = [lsd(harmonic_dist(ref_a, f0_ref, t), harmonic_dist(syn_a, f0_syn, t))
@@ -368,31 +257,17 @@ def compare_note(syn, ref, f0):
 
     Ms, Mr = mel_spectrogram(syn_a), mel_spectrogram(ref_a)
     k = min(len(Ms), len(Mr))
-    # Normalise each side to its own maximum -- this compares "shape", not "loudness"
+
     Ms = Ms[:k] - Ms[:k].max()
     Mr = Mr[:k] - Mr[:k].max()
-    # Floor at -30 dB (relative to the overall peak), not -60.
-    #
-    # Why it changed: real instruments contain random components by nature. A
-    # control experiment was run -- add noise that is "exactly the right amount,
-    # only a different random realisation" to the original file, then compare
-    # that against the original file itself:
-    #     floor -60 dB -> false difference 5.4 dB   piano vs violin (real) 14.7 dB
-    #     floor -30 dB -> false difference 1.3 dB   piano vs violin          4.1 dB
-    # With the floor too low, most of what the metric penalises is "the random
-    # draw differs", which cannot and should not be fixed, and the discrimination
-    # (real difference / false difference) actually gets worse. Content below
-    # -30 dB is perceptually masked anyway.
-    #
-    # When reading it, remember: this metric's own noise floor is about 1.3 dB,
-    # and differences below that mean nothing.
+
     mel_mae = float(np.mean(np.abs(np.maximum(Ms, MEL_FLOOR_DB) - np.maximum(Mr, MEL_FLOOR_DB))))
 
     cs, es_e = centroid_track(syn_a)
     cr, er_e = centroid_track(ref_a)
     k = min(len(cs), len(cr))
     cs, cr, er_e = cs[:k], cr[:k], er_e[:k]
-    # Only compare the stretches where the reference is loud enough: in quiet parts the centroid is set by the noise floor and means nothing
+
     live = er_e > 0.01 * er_e.max()
     cent_r = pearson(cs[live], cr[live]) if live.sum() >= 4 else np.nan
     w = er_e / max(er_e.sum(), 1e-12)
@@ -401,10 +276,10 @@ def compare_note(syn, ref, f0):
 
     nf_s, nd_s = aperiodic(syn_a, f0)
     nf_r, nd_r = aperiodic(ref_a, f0)
-    # amount error in dB (0 = exactly right; positive = too much noise)
+
     noise_db = (10 * np.log10((nf_s + 1e-9) / (nf_r + 1e-9))
                 if (nf_s == nf_s and nf_r == nf_r) else np.nan)
-    # placement error: which bands the residual falls in, as a mean absolute error in percentage points
+
     noise_pos = (float(np.mean(np.abs(nd_s - nd_r)))
                  if (nd_s is not None and nd_r is not None) else np.nan)
 
@@ -416,13 +291,12 @@ def compare_note(syn, ref, f0):
                 cent_r=cent_r, cent_syn=cent_syn, cent_ref=cent_ref,
                 sustaining=bool(body_end < len(er_a)))
 
-
 def main():
     ap = argparse.ArgumentParser(description="合成音色 vs 原始素材的客觀評測")
     ap.add_argument("scale", help="合成的半音階 WAV（韌體按 w 錄的 PLAY.WAV，或模擬器產生的）")
     ap.add_argument("refs", nargs="+", help="原始單音素材（檔案或資料夾）")
     ap.add_argument("--bpm", type=float, default=66.0)
-    # Default is the firmware's 24 notes C3~B4; files produced by xrange cover a different range, use these two options
+
     ap.add_argument("--start", type=int, default=48,
                     help="合成檔第一個音的 MIDI 音高（預設 48 = C3）")
     ap.add_argument("--count", type=int, default=24,
@@ -432,14 +306,9 @@ def main():
                     help="把逐音的數字另存成 JSON，給 report_docx.py 產生 Word 報告用")
     args = ap.parse_args()
 
-    # collect the reference material
     files = []
     for r in args.refs:
-        # Accept either case of the extension: what the firmware writes is
-        # REC.WAV / T_C4.WAV (all caps), and taking lowercase only silently
-        # skips every "evaluate with material the machine recorded itself" run,
-        # with an error message reading "no reference material could be paired
-        # by pitch" that makes it look like a filename-format problem.
+
         if os.path.isdir(r):
             files += glob.glob(os.path.join(r, "*.wav")) + glob.glob(os.path.join(r, "*.WAV"))
         else:
@@ -510,11 +379,6 @@ def main():
         except ImportError:
             print("\n(沒有 matplotlib，跳過畫圖：pip install matplotlib)")
 
-    # Also write the per-note numbers out in a machine-readable form. The report
-    # generator eats that file rather than parsing the table above -- the table
-    # is for humans, its format changes whenever readability calls for it, and
-    # using it as a data interface will eventually break silently after one
-    # column-width edit.
     if args.json:
         import json
         out = {
@@ -538,18 +402,11 @@ def main():
             json.dump(out, f, ensure_ascii=False, indent=2)
         print(f"\n已輸出 JSON：{args.json}")
 
-
 def make_plot(path, rows, notes, ref_by_midi):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # Always label the plots in English. The default matplotlib font has no CJK
-    # glyphs, so Chinese comes out as tofu boxes; showing it would mean
-    # installing and registering a CJK font first, an extra burden on the user.
-    # The terminal report is still full Chinese.
-
-    # pick a note that has a reference and plot its spectrogram and envelope
     pick = None
     for midi, seg in notes:
         if midi in ref_by_midi:
@@ -593,7 +450,6 @@ def make_plot(path, rows, notes, ref_by_midi):
     plt.tight_layout()
     plt.savefig(path, dpi=110)
     print(f"\n已輸出比較圖：{path}")
-
 
 if __name__ == "__main__":
     main()

@@ -1,19 +1,13 @@
 #include "trainer.h"
 
-// ============================================================================
-//  Memory layout: everything goes in DMAMEM (OCRAM), leaving DTCM for the audio ISR
-// ============================================================================
-DMAMEM static TrainSample gSamples[TC_TRAIN_MAX];    // 215 KB
-DMAMEM static float       gGrad[TC_MLP_NPARAM];      //  7 KB
-DMAMEM static float       gAdamM[TC_MLP_NPARAM];     //  7 KB
-DMAMEM static float       gAdamV[TC_MLP_NPARAM];     //  7 KB
+DMAMEM static TrainSample gSamples[TC_TRAIN_MAX];
+DMAMEM static float       gGrad[TC_MLP_NPARAM];
+DMAMEM static float       gAdamM[TC_MLP_NPARAM];
+DMAMEM static float       gAdamV[TC_MLP_NPARAM];
 
-// MlpWeights has to be "magic + TC_MLP_NPARAM tightly packed floats", so that Adam can update
-// it as a flat array and the MODEL.BIN written out stays binary-compatible with the Python version.
 static_assert(sizeof(MlpWeights) == sizeof(uint32_t) + TC_MLP_NPARAM * sizeof(float),
               "MlpWeights 出現 padding，攤平索引會錯位");
 
-// Start of the flattened index
 #define OFF_W1 0
 #define OFF_B1 (OFF_W1 + TC_MLP_H1 * TC_MLP_IN)
 #define OFF_W2 (OFF_B1 + TC_MLP_H1)
@@ -26,9 +20,6 @@ static inline float *flatOf(MlpWeights &w) { return &w.w1[0][0]; }
 static void (*gProgressCb)(int, int, float, float) = nullptr;
 void trainerSetProgressCallback(void (*cb)(int, int, float, float)) { gProgressCb = cb; }
 
-// ============================================================================
-//  Random numbers: xorshift32 + Box-Muller
-// ============================================================================
 static uint32_t gRng = 2463534242u;
 static inline uint32_t xrand() {
   gRng ^= gRng << 13; gRng ^= gRng >> 17; gRng ^= gRng << 5;
@@ -41,9 +32,6 @@ static float nrand() {
   return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
 }
 
-// ============================================================================
-//  TrainSet
-// ============================================================================
 void TrainSet::clear() { _n = 0; _warned = false; }
 
 const TrainSample *TrainSet::data() const { return gSamples; }
@@ -66,8 +54,7 @@ bool TrainSet::add(const float *in, const float *harm, float noise) {
 }
 
 int TrainSet::pitchCount() const {
-  // in[0] = clip(log2(f0/261.63)/3). Every frame of the same note has an identical in[0],
-  // so grouping with a tolerance of 0.005 (about half a semitone) is enough.
+
   float seen[16];
   int   k = 0;
   for (int i = 0; i < _n; i++) {
@@ -89,14 +76,6 @@ void TrainSet::summary() const {
                      "跨音高的部分由頻譜包絡校正負責，但多幾個音高效果更好。"));
 }
 
-// ============================================================================
-//  Forward / backward
-// ============================================================================
-// tanh / sigmoid always come from tc_tanh / tc_sigmoid in config.h -- literally the same
-// implementation as the inference path. Not just for speed (tanhf costs 50~100 cycles on the
-// M7), but to avoid the train/inference mismatch of "exact tanh in training, an approximation at inference".
-
-// Forward pass, returning the activations of each layer. z3 are the logits.
 static void forward(const MlpWeights &w, const float *x,
                     float *a1, float *a2, float *z3) {
   for (int i = 0; i < TC_MLP_H1; i++) {
@@ -116,7 +95,6 @@ static void forward(const MlpWeights &w, const float *x,
   }
 }
 
-// logits -> probabilities. softmax over the first TC_N_HARM (32), sigmoid on the last one.
 static void activate(float *z3, float *ph, float *pn) {
   float mx = z3[0];
   for (int i = 1; i < TC_N_HARM; i++) if (z3[i] > mx) mx = z3[i];
@@ -127,7 +105,6 @@ static void activate(float *z3, float *ph, float *pn) {
   *pn = tc_sigmoid(z3[TC_N_HARM]);
 }
 
-// Whole-dataset evaluation: cross-entropy + mean absolute error of the partials
 static void evaluate(const MlpWeights &w, const TrainSample *s, int n,
                      float *ceOut, float *maeOut) {
   float a1[TC_MLP_H1], a2[TC_MLP_H2], z3[TC_MLP_OUT], ph[TC_N_HARM], pn;
@@ -145,7 +122,6 @@ static void evaluate(const MlpWeights &w, const TrainSample *s, int n,
   *maeOut = (float)(mae / ((double)n * TC_N_HARM));
 }
 
-// ============================================================================
 bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
               uint32_t seed, int progressEvery) {
   const int n = ts.size();
@@ -159,14 +135,6 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
   gRng = seed ? seed : 1u;
   float *W = flatOf(out);
 
-  // ---- Xavier / LeCun initialization -------------------------------------
-  //
-  // The standard deviation is sqrt(1/fan_in). Deliberately not He init (sqrt(2/fan_in)) --
-  // He is designed for ReLU (it compensates for the variance killed off on the negative half),
-  // whereas the hidden layers here use tanh, whose slope near the origin is close to 1,
-  // and only sqrt(1/fan_in) keeps the activation variance stable from layer to layer.
-  //
-  // The old comment saying "He initialization" was a slip; the code itself was always right.
   out.magic = TC_MLP_MAGIC;
   for (int i = 0; i < TC_MLP_NPARAM; i++) W[i] = 0.0f;
   {
@@ -176,7 +144,7 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
     for (int i = 0; i < TC_MLP_H1 * TC_MLP_IN; i++)  W[OFF_W1 + i] = nrand() * s1;
     for (int i = 0; i < TC_MLP_H2 * TC_MLP_H1; i++)  W[OFF_W2 + i] = nrand() * s2;
     for (int i = 0; i < TC_MLP_OUT * TC_MLP_H2; i++) W[OFF_W3 + i] = nrand() * s3;
-    // All biases left at 0
+
   }
   for (int i = 0; i < TC_MLP_NPARAM; i++) { gAdamM[i] = 0.0f; gAdamV[i] = 0.0f; }
 
@@ -193,7 +161,6 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
     Serial.printf("        epoch %5d   CE %.4f   平均諧波誤差 %.5f\n", 0, ce, mae);
   }
 
-  // ---- Main loop ----------------------------------------------------------
   float a1[TC_MLP_H1], a2[TC_MLP_H2], z3[TC_MLP_OUT];
   float ph[TC_N_HARM], pn;
   float dz3[TC_MLP_OUT], dz2[TC_MLP_H2], dz1[TC_MLP_H1];
@@ -207,11 +174,9 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
       forward(out, s.in, a1, a2, z3);
       activate(z3, ph, &pn);
 
-      // For both softmax+CE and sigmoid+BCE the gradient w.r.t. the logits is (prediction - target)
       for (int i = 0; i < TC_N_HARM; i++) dz3[i] = (ph[i] - tc_dequant(s.harm[i])) * invB;
       dz3[TC_N_HARM] = TC_TRAIN_NOISE_W * (pn - tc_dequant(s.noise)) * invB;
 
-      // Layer 3
       for (int i = 0; i < TC_MLP_OUT; i++) {
         float d = dz3[i];
         if (d == 0.0f) continue;
@@ -219,7 +184,7 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
         for (int j = 0; j < TC_MLP_H2; j++) g[j] += d * a2[j];
         gGrad[OFF_B3 + i] += d;
       }
-      // Back to layer 2
+
       for (int j = 0; j < TC_MLP_H2; j++) {
         float s2 = 0.0f;
         for (int i = 0; i < TC_MLP_OUT; i++) s2 += dz3[i] * out.w3[i][j];
@@ -231,7 +196,7 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
         for (int j = 0; j < TC_MLP_H1; j++) g[j] += d * a1[j];
         gGrad[OFF_B2 + i] += d;
       }
-      // Back to layer 1
+
       for (int j = 0; j < TC_MLP_H1; j++) {
         float s1 = 0.0f;
         for (int i = 0; i < TC_MLP_H2; i++) s1 += dz2[i] * out.w2[i][j];
@@ -245,7 +210,6 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
       }
     }
 
-    // ---- Adam ------------------------------------------------------------
     b1t *= b1;
     b2t *= b2;
     const float c1 = 1.0f / (1.0f - b1t);
@@ -263,7 +227,7 @@ bool trainMlp(const TrainSet &ts, MlpWeights &out, int epochs, float lr,
       Serial.printf("        epoch %5d   CE %.4f   平均諧波誤差 %.5f   (%lu s)\n",
                     ep, ce, mae, (unsigned long)((millis() - t0) / 1000));
       if (gProgressCb) gProgressCb(ep, epochs, ce, mae);
-      if (!(ce == ce)) {                        // NaN check
+      if (!(ce == ce)) {
         Serial.println(F("[TRAIN] 發散了 (NaN)。把 lr 調小再試一次。"));
         return false;
       }

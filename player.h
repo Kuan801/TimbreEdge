@@ -1,8 +1,3 @@
-// ============================================================================
-//  player.h  -  score scheduler
-//  Polled from loop(); drives noteOn / noteOff on the synth along a tick timeline.
-//  Time is accumulated with micros(), so it won't drift when loop() stalls on SD access.
-// ============================================================================
 #pragma once
 
 #include <Arduino.h>
@@ -13,7 +8,7 @@
 class Player {
 public:
   void begin(AudioSynthAdditive *synth);
-  void load();                                  // Regenerate the score (playback is stopped first)
+  void load();
   void start(float bpm = TC_BPM);
   void stop();
   void service();

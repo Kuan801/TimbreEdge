@@ -1,10 +1,3 @@
-// ============================================================================
-//  sim_support.cpp  -  platform glue for the desktop simulator
-//
-//  Stub implementations of Serial / SD / SPI / AudioStream. These used to live
-//  next to main() in sim_main.cpp; splitting them out is what lets extra test
-//  programs such as midi_test link against them.
-// ============================================================================
 #include "Arduino.h"
 #include "Audio.h"
 #include "SD.h"
@@ -12,7 +5,6 @@
 #include <string>
 #include <cstring>
 
-// ------------------------------------------------- global simulator state --
 uint64_t    sim_micros = 0;
 SimSerial   Serial;
 SDClass     SD;
@@ -33,4 +25,3 @@ void AudioStream::transmit(audio_block_t *b, unsigned char ch) {
   if (!b) return;
   memcpy(ch == 0 ? sim_outL : sim_outR, b->data, sizeof(b->data));
 }
-

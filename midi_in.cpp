@@ -7,26 +7,10 @@ MidiInput gMidi;
 
 #include <USBHost_t36.h>
 
-// The USBHost objects have to be global (the library uses them from interrupt context) and
-// cannot be class members, so they live at file scope in this .cpp.
 static USBHost     usbHost;
 static USBHub      usbHub1(usbHost);
-static USBHub      usbHub2(usbHost);        // Some people connect through a hub, so allow one extra layer
+static USBHub      usbHub2(usbHost);
 
-// ---------------------------------------------------------------------------
-//  USB descriptor dumper
-//
-//  claim_drivers() offers every interface to *all* drivers that have not yet claimed a
-//  device, and it carries on to the next interface even after someone has claimed one. So
-//  a driver that always returns false, placed right at the front, prints out every interface
-//  and endpoint of the whole device without disturbing the normal claim process at all.
-//
-//  This is the only way to pin down "the device connects but no data arrives" -- the first two
-//  guesses (wrong interface claimed, packets larger than 64) were refuted by the source; no more guessing.
-//
-//  Must be declared before MIDIDevice: driver_ready_for_device() appends to the tail of the
-//  list, so construction order is the order in which drivers get asked.
-// ---------------------------------------------------------------------------
 class UsbDescDump : public USBDriver {
 public:
   UsbDescDump(USBHost &host) { (void)host; driver_ready_for_device(this); }
@@ -53,12 +37,11 @@ protected:
     if (p[5] == 0xFF)           Serial.print(F("   <- 廠商自訂"));
     Serial.println();
 
-    // Scan forward to the next interface, printing the endpoints
     const uint8_t *end = descriptors + len;
     p += 9;
     while (p + 2 <= end && p[0] >= 2) {
-      if (p[1] == 4 || p[1] == 11) break;          // Next interface / IAD
-      if (p[1] == 5 && p[0] >= 7) {                // Endpoint
+      if (p[1] == 4 || p[1] == 11) break;
+      if (p[1] == 5 && p[0] >= 7) {
         const uint16_t mps = p[4] | (p[5] << 8);
         const char *dir = (p[2] & 0x80) ? "IN " : "OUT";
         const char *tp  = (p[3] & 3) == 2 ? "bulk" : (p[3] & 3) == 3 ? "interrupt"
@@ -69,35 +52,13 @@ protected:
       }
       p += p[0];
     }
-    return false;    // Never claim
+    return false;
   }
   void disconnect() override {}
 };
 
 static UsbDescDump usbDump(usbHost);
 
-// ---------------------------------------------------------------------------
-//  Why there are *four* MIDIDevice objects, and why the BigBuffer variant
-//
-//  Symptom: the device enumerates, product() reads back a name, but not a single message
-//  arrives. Reading midi.cpp in USBHost_t36 turned up two mechanisms that both cause this:
-//
-//  1) claim() is called *per interface*, and it ends with return (rxpipe || txpipe).
-//     Many USB MIDI keyboards are composite, with Audio Control (not MIDI Streaming) as the
-//     first interface. The CS_INTERFACE header inside it makes claim() set ismidi to true, and
-//     if it happens to carry an interrupt endpoint too, the first MIDIDevice claims the *wrong
-//     interface* -- so (bool) is true and the name reads back fine, but nobody picks up the
-//     MIDI Streaming interface that actually sends the notes, and no data ever arrives.
-//     The fix is more MIDIDevice objects: the first takes the wrong one, the second the right one.
-//
-//  2) claim() contains `if (rx_ep && rx_size <= max_packet_size)`.
-//     max_packet_size is 64 on MIDIDevice and 512 on MIDIDevice_BigBuffer. When the endpoint
-//     declares a packet larger than 64, the small version quietly never builds the receive pipe,
-//     yet claim() still returns true as long as the transmit pipe comes up. Again "connected but
-//     no data". The official examples always use BigBuffer precisely to avoid this.
-//
-//  Four objects cost about 12 KB of RAM, which is nothing against the Teensy 4.1's 1 MB.
-// ---------------------------------------------------------------------------
 static MIDIDevice_BigBuffer usbMidi0(usbHost);
 static MIDIDevice_BigBuffer usbMidi1(usbHost);
 static MIDIDevice_BigBuffer usbMidi2(usbHost);
@@ -107,51 +68,14 @@ static MIDIDevice_BigBuffer *const kPorts[] = {
 };
 static const int kNumPorts = (int)(sizeof(kPorts) / sizeof(kPorts[0]));
 
-// ---------------------------------------------------------------------------
-//  Ordinary USB computer keyboard
-//
-//  --- Why this lives in the same .cpp as MIDI instead of its own file --------
-//
-//  USBHost_t36 driver objects hook themselves into a static list by calling
-//  driver_ready_for_device() from their *constructor*. Static initialization order across
-//  translation units is undefined in C++ -- splitting them into two files is a gamble: sometimes
-//  KeyboardController comes before MIDIDevice, sometimes after, and that order decides who gets
-//  asked to claim() first. Worse, the list can be touched before usbHost itself is constructed.
-//
-//  Keep them all in one file and the order is the written order, which is deterministic.
-//  kbd_in.cpp keeps only the USB-independent logic (key mapping, note firing, queue), testable on a desktop.
-//
-//  --- Why USBHIDParser is needed ----------------------------------------------
-//
-//  KeyboardController derives from USBHIDInput, not USBDriver -- it does not claim an interface
-//  itself; USBHIDParser claims the HID interface, parses the reports and passes them on.
-//  Without USBHIDParser the keyboard enumerates but produces no events at all.
-//  Three of them because some keyboards are composite (keyboard + media keys + mouse), one per interface.
-// ---------------------------------------------------------------------------
 static USBHIDParser        usbHid1(usbHost);
 static USBHIDParser        usbHid2(usbHost);
 static USBHIDParser        usbHid3(usbHost);
 static KeyboardController  usbKbd(usbHost);
 
-// The callbacks are C function pointers, so again a file-scope free function has to relay them.
-//
-// attachRawPress rather than attachPress: raw gives the HID usage code, which corresponds to the
-// "physical position on the keyboard"; attachPress gives unicode with the layout already applied,
-// which falls apart on an AZERTY keyboard or when the user switches input method. Keys want position.
 static void hKeyRawPress(uint8_t code)   { gKbd.feedFromUsb(code, true);  }
 static void hKeyRawRelease(uint8_t code) { gKbd.feedFromUsb(code, false); }
 
-// ---------------------------------------------------------------------------
-//  Use the setHandle* callbacks, not getType().
-//
-//  getType()'s return value means different things across USBHost_t36 versions (early on a
-//  1-based index, later the real MIDI status byte), and the midi::NoteOn constants sitting next
-//  to it actually belong to a different library (the Arduino MIDI Library) -- that namespace
-//  does not exist when USBHost_t36 is used on its own, so writing midi::NoteOn simply won't
-//  compile. setHandle* is the interface the official examples use, and it is stable across versions.
-//
-//  The callbacks are C function pointers, so file-scope free functions relay them to gMidi.
-// ---------------------------------------------------------------------------
 static void hNoteOn(uint8_t ch, uint8_t note, uint8_t vel) {
   (void)ch; gMidi.feed(0x90, note, vel);
 }
@@ -162,8 +86,7 @@ static void hControlChange(uint8_t ch, uint8_t cc, uint8_t val) {
   (void)ch; gMidi.feed(0xB0, cc, val);
 }
 static void hPitchChange(uint8_t ch, int pitch) {
-  // The callback hands over an already-centred value (-8192 ~ 8191); convert it back to the raw
-  // 14 bit form so every message goes through the same feed() entry point -- the one with desktop test coverage.
+
   (void)ch;
   int v14 = pitch + 8192;
   if (v14 < 0) v14 = 0;
@@ -188,8 +111,6 @@ void MidiInput::begin(AudioSynthAdditive *s) {
 void MidiInput::service() {
   usbHost.Task();
 
-  // ---- Computer keyboard connection state --------------------------------
-  // Shares the one USB Host port with MIDI, so it is tracked here as well.
   const bool kb = (bool)usbKbd;
   if (kb != gKbd.connected()) {
     gKbd.setConnected(kb);
@@ -206,8 +127,6 @@ void MidiInput::service() {
     }
   }
 
-  // ---- Connection state --------------------------------------------------
-  // Connected as soon as any slot has a device. The name is taken from the first one that reports one.
   bool any = false;
   _nPorts = 0;
   for (int i = 0; i < kNumPorts; i++) {
@@ -238,26 +157,17 @@ void MidiInput::service() {
   }
   if (!any) return;
 
-  // ---- Receive messages --------------------------------------------------
-  // All four slots have to be read. read() returning true means "a message was decoded"; the
-  // callbacks are invoked inside it. _rawReads is counted separately: if it climbs while _msgs
-  // stays 0, everything arriving is of a type we registered no callback for (Active Sensing, MIDI
-  // Clock), meaning the keyboard is sending something but no notes -- the two cases must be distinguishable.
   for (int i = 0; i < kNumPorts; i++)
     while (kPorts[i]->read()) _rawReads++;
 }
 
-#else   // ------------------------------------------------------- desktop --
+#else
 
-// The simulator has no USB Host. Empty implementations, so no other code needs conditional compilation.
 void MidiInput::begin(AudioSynthAdditive *s) { _synth = s; }
 void MidiInput::service() {}
 
 #endif
 
-// ============================================================================
-//  Everything below is platform-independent and compiles in the simulator too, handy for testing the logic on a desktop
-// ============================================================================
 void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
   _msgs++;
   if (_verbose)
@@ -265,7 +175,7 @@ void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
 
   switch (status & 0xF0) {
     case 0x90:
-      // Per the MIDI spec a NoteOn with velocity 0 is a NoteOff, and plenty of keyboards send it that way
+
       if (d2 == 0) onNoteOff(d1); else onNoteOn(d1, d2);
       break;
     case 0x80:
@@ -276,7 +186,7 @@ void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
       onControl(d1, d2);
       break;
     case 0xE0: {
-      const int bend = ((int)d2 << 7) | d1;          // 14 bit, centre value 8192
+      const int bend = ((int)d2 << 7) | d1;
       if (_synth)
         _synth->setPitchBend((bend - 8192) / 8192.0f * TC_MIDI_BEND_RANGE);
       break;
@@ -289,16 +199,6 @@ void MidiInput::feed(uint8_t status, uint8_t d1, uint8_t d2) {
 void MidiInput::onNoteOn(uint8_t note, uint8_t vel) {
   if (!_synth) return;
 
-  // Velocity mapping: MIDI 1~127 -> 0.08~1.0.
-  //
-  // Squared rather than linear: MIDI velocity feels close to "volume", and volume relates to
-  // amplitude as a square, so a linear mapping leaves soft playing sounding loud anyway. The 0.08
-  // floor is there because the synth plays the envelope curve measured in the profile, and smaller
-  // values get eaten by the thresholds downstream and come out silent.
-  //
-  // Honestly: the material only has one velocity (Piano.mf, say), so all this changes is volume;
-  // the "louder you play, the more overtones" part of a real piano cannot be reproduced. Doing that
-  // would mean recording pp/mf/ff of the same note and building a profile for each.
   float v = (float)vel / 127.0f;
   v = 0.08f + 0.92f * v * v;
 
@@ -313,8 +213,7 @@ void MidiInput::onNoteOn(uint8_t note, uint8_t vel) {
     case AudioSynthAdditive::NOTE_NO_TIMBRE:
     case AudioSynthAdditive::NOTE_NO_MODEL:
       _noTimbre++;
-      // This is the most common reason for "pressed a key, got no sound", and there used to be
-      // no hint of it whatsoever. Printed once only, or a few keypresses would flood the log.
+
       if (!_warned) {
         _warned = true;
         Serial.println(F("[MIDI] 收到音符，但目前沒有載入任何音色，所以不會發聲。"));
@@ -329,7 +228,6 @@ void MidiInput::onNoteOn(uint8_t note, uint8_t vel) {
       break;
   }
 
-  // This note has been pressed again, so drop it from the "waiting to be released by the sustain pedal" list
   for (int i = 0; i < _nDeferred; i++) {
     if (_held[i] == note) {
       _held[i] = _held[--_nDeferred];
@@ -343,7 +241,7 @@ void MidiInput::onNoteOff(uint8_t note) {
   if (_nHeld > 0) _nHeld--;
 
   if (_sustain) {
-    // Pedal held down: just record it; the noteOff goes out when the pedal is released
+
     for (int i = 0; i < _nDeferred; i++) if (_held[i] == note) return;
     if (_nDeferred < (int)sizeof(_held)) _held[_nDeferred++] = note;
     return;
@@ -355,7 +253,7 @@ void MidiInput::onControl(uint8_t cc, uint8_t val) {
   if (!_synth) return;
   switch (cc) {
     case TC_MIDI_CC_SUSTAIN:
-      // Standard: >= 64 counts as pressed
+
       if (val >= 64) {
         _sustain = true;
       } else {
@@ -370,7 +268,7 @@ void MidiInput::onControl(uint8_t cc, uint8_t val) {
       break;
 
     case TC_MIDI_CC_VOLUME:
-      // Don't let a knob turned all the way down actually reach 0, or it looks like a crash
+
       _synth->setMasterGain(0.02f + 0.60f * (val / 127.0f));
       break;
 
@@ -394,9 +292,6 @@ void MidiInput::panic() {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  Diagnostics: print the counter for each stage of the chain, with advice matched to where it broke.
-// ---------------------------------------------------------------------------
 void MidiInput::report() const {
   Serial.println();
   Serial.println(F("========== MIDI 診斷 =========="));
@@ -424,17 +319,12 @@ void MidiInput::report() const {
 
   Serial.println(F("-- 判讀 --"));
 
-  // This part comes first: if the computer keyboard responds at all, the USB Host port hardware is
-  // fine and none of the "check whether D+/D- are swapped" advice below needs reading.
-  // The two device types use different endpoint types (HID is interrupt, USB MIDI is bulk), so
-  // "keyboard works, MIDI doesn't" is a meaningful result too -- it puts the problem at the protocol layer.
   if (gKbd.pressCount() > 0) {
     Serial.println(F("  電腦鍵盤有收到按鍵 -> USB Host 埠的接線與供電確定正常。"));
     if (!_connected)
       Serial.println(F("  所以 MIDI 鍵盤那邊的問題在裝置本身或它的 USB 協定，不是你的焊接。"));
   }
-  // Order matters: once messages are coming in the device is definitely fine, and at that point
-  // nobody should be told to go and check their wiring.
+
   if (!_connected && _msgs == 0) {
     Serial.println(F("  裝置沒被列舉出來。依序檢查："));
     Serial.println(F("   1. 鍵盤本身的燈有沒有亮？沒亮代表 USB Host 埠的 5V 沒接到"));

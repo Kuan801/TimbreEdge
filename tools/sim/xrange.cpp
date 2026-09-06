@@ -1,22 +1,3 @@
-// ============================================================================
-//  xrange.cpp  -  experiment tool: "train on a narrow range, extrapolate out"
-//
-//  Usage:
-//     ./xrange out.wav <startMIDI> <endMIDI> training.WAV [training.WAV ...]
-//
-//  Example: build the bank from C4~B4 only, but make it play E3~B5
-//     ./xrange out.wav 52 83 T_C4.WAV T_Db4.WAV ... T_B4.WAV
-//
-//  Why this exists instead of just using sim:
-//  sim plays the 24 notes C3~B4 hard-coded in score.cpp. To measure "how far
-//  transposition degrades the timbre" the played range and the trained range
-//  have to be given independently -- notes inside the trained range are
-//  interpolation, only the ones outside really exercise transposition and
-//  formant correction.
-//
-//  Timing is deliberately identical to score.cpp (66 BPM, 8 ticks per note,
-//  no gaps) so that evaluate.py can cut the notes apart.
-// ============================================================================
 #include <Arduino.h>
 #include <Audio.h>
 #include <cstdio>
@@ -46,7 +27,6 @@ int main(int argc, char **argv) {
   const int   midiLo  = atoi(argv[2]);
   const int   midiHi  = atoi(argv[3]);
 
-  // ---- Build the bank (only the files given on the command line) ----------
   printf("=== 建立音色庫 ===\n");
   for (int i = 4; i < argc; i++) {
     InstrumentProfile p;
@@ -64,7 +44,6 @@ int main(int argc, char **argv) {
   gSynth.setMasterGain(0.18f);
   gSynth.setVibrato(50.0f, 4.8f);
 
-  // Pitch range the bank covers (used to mark each note interpolated or extrapolated)
   float bankLo = 1e9f, bankHi = 0.0f;
   for (int i = 0; i < gBank.n; i++) {
     if (gBank.p[i].f0 < bankLo) bankLo = gBank.p[i].f0;
@@ -72,8 +51,6 @@ int main(int argc, char **argv) {
   }
   printf("\n音色庫 %d 組，涵蓋 %.1f ~ %.1f Hz\n", gBank.n, bankLo, bankHi);
 
-  // ---- Play ---------------------------------------------------------------
-  // Timing matches score.cpp: 8 ticks per note, tick = 60/(BPM*4) seconds
   const float tickSec  = 60.0f / (TC_BPM * TC_TICKS_PER_BEAT);
   const float noteSec  = 8.0f * tickSec;
   const int   blocksPerNote = (int)(noteSec / TC_BLOCK_SEC + 0.5f);
@@ -92,8 +69,7 @@ int main(int argc, char **argv) {
 
     gSynth.noteOn((float)m, 100.0f / 127.0f, 0.5f);
     for (int b = 0; b < blocksPerNote; b++) {
-      // score.cpp's dur == NOTE_TICKS, so the release instant is this slot's end.
-      // Send noteOff one block early so it doesn't collide with the next noteOn.
+
       if (b == blocksPerNote - 1) gSynth.noteOff((float)m);
       gSynth.update();
       for (int k = 0; k < TC_BLOCK; k++) {
@@ -102,7 +78,7 @@ int main(int argc, char **argv) {
       }
     }
   }
-  // Let the last note's release run out
+
   gSynth.allNotesOff();
   for (int b = 0; b < (int)(1.5f / TC_BLOCK_SEC); b++) {
     gSynth.update();
@@ -112,7 +88,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ---- Write the file -----------------------------------------------------
   FILE *f = fopen(outPath, "wb");
   if (!f) { printf("無法寫入 %s\n", outPath); return 1; }
   const uint32_t dataBytes = (uint32_t)(pcm.size() * 2);
