@@ -1,0 +1,45 @@
+# Desktop simulator build products (make regenerates them; not portable across machines)
+tools/sim/sim
+tools/sim/bank_test
+tools/sim/canon
+tools/sim/chaincheck
+tools/sim/display_test
+tools/sim/envdist
+tools/sim/evict_test
+tools/sim/kbd_test
+tools/sim/midi_test
+tools/sim/reccheck_test
+tools/sim/recscan
+tools/sim/score_test
+tools/sim/setdir_test
+tools/sim/trigger_test
+tools/sim/ui_test
+tools/sim/wavhdr_test
+tools/sim/wavname_test
+tools/sim/xrange
+*.o
+*.exe
+
+# Audio the simulator renders (a canon run regenerates these, about 17 MB)
+tools/sim/out.wav
+tools/sim/scale.wav
+tools/sim/canon_kf.wav
+tools/sim/canon_mlp.wav
+
+# Evaluation output
+tools/*.png
+tools/r.json
+tools/report.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Reports and backups are kept out of version control; this repository is code only
+*.docx
+*.bak
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini

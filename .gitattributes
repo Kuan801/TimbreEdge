@@ -1,0 +1,13 @@
+# No end-of-line conversion. The files in this repository are stored with CRLF
+# endings, and normalising them would rewrite every line of every file.
+* -text
+
+# Marked binary so git does not try to diff or re-encode them
+*.png   binary
+*.wav   binary
+*.WAV   binary
+*.bin   binary
+*.BIN   binary
+*.docx  binary
+*.pptx  binary
+*.pyc   binary
